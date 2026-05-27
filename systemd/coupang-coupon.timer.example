@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Coupang WING coupon automation every day at 00:01 KST
+
+[Timer]
+OnCalendar=*-*-* 00:01:00
+Persistent=true
+Unit=coupang-coupon.service
+
+[Install]
+WantedBy=timers.target

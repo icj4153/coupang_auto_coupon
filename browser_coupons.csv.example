@@ -1,0 +1,2 @@
+enabled,campaign_name,coupon_kind,vendor_item_ids,discount_type,discount,min_order_price,max_discount_price,max_issue_count
+true,오늘만 특가,downloadable,"123456;234567;345678",PRICE,2000,5000,,2

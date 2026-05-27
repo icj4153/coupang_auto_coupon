@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  coupang-coupon-web:
+    build: .
+    container_name: coupang-coupon-web
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Seoul
+      COUPON_DATA_DIR: /data
+      COUPON_CONFIG_PATH: /data/browser_coupon_config.json
+      COUPON_ARTIFACT_DIR: /data/browser_artifacts
+      COUPON_BIND_HOST: 0.0.0.0
+      COUPON_PORT: 8765
+      COUPON_OPEN_BROWSER: "false"
+    ports:
+      - "${COUPON_WEB_BIND:-127.0.0.1}:8765:8765"
+    volumes:
+      - ./data:/data
+
+  coupang-coupon-scheduler:
+    build: .
+    container_name: coupang-coupon-scheduler
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    command:
+      - python3
+      - nas_scheduler.py
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Seoul
+      COUPON_DATA_DIR: /data
+      COUPON_CONFIG_PATH: /data/browser_coupon_config.json
+      COUPON_ARTIFACT_DIR: /data/browser_artifacts
+      COUPON_DAILY_TIME: "00:01"
+    volumes:
+      - ./data:/data

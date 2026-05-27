@@ -1,0 +1,89 @@
+name: Deploy NAS
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: coupang-coupon-nas-deploy-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to Synology NAS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in NAS_HOST NAS_PORT NAS_USER NAS_SSH_PRIVATE_KEY NAS_KNOWN_HOSTS; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::Missing required GitHub Secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+        env:
+          NAS_HOST: ${{ secrets.NAS_HOST }}
+          NAS_PORT: ${{ secrets.NAS_PORT }}
+          NAS_USER: ${{ secrets.NAS_USER }}
+          NAS_SSH_PRIVATE_KEY: ${{ secrets.NAS_SSH_PRIVATE_KEY }}
+          NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$NAS_SSH_PRIVATE_KEY" > ~/.ssh/nas_deploy_key
+          printf '%s\n' "$NAS_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/nas_deploy_key
+          chmod 644 ~/.ssh/known_hosts
+          ssh-keygen -y -f ~/.ssh/nas_deploy_key >/dev/null
+        env:
+          NAS_SSH_PRIVATE_KEY: ${{ secrets.NAS_SSH_PRIVATE_KEY }}
+          NAS_KNOWN_HOSTS: ${{ secrets.NAS_KNOWN_HOSTS }}
+
+      - name: Verify NAS SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh \
+            -i ~/.ssh/nas_deploy_key \
+            -p "$NAS_PORT" \
+            -o BatchMode=yes \
+            "$NAS_USER@$NAS_HOST" \
+            'echo github-actions-ssh-ok'
+        env:
+          NAS_HOST: ${{ secrets.NAS_HOST }}
+          NAS_PORT: ${{ secrets.NAS_PORT }}
+          NAS_USER: ${{ secrets.NAS_USER }}
+
+      - name: Deploy on NAS
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh \
+            -i ~/.ssh/nas_deploy_key \
+            -p "$NAS_PORT" \
+            -o BatchMode=yes \
+            "$NAS_USER@$NAS_HOST" \
+            'set -eu
+             cd /volume1/docker/coupang_coupon
+             sh nas_update.sh
+             PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+             /usr/local/bin/docker ps --filter name=coupang-coupon
+             /usr/local/bin/docker-compose logs --tail=30 coupang-coupon-web
+             /usr/local/bin/docker-compose logs --tail=30 coupang-coupon-scheduler'
+        env:
+          NAS_HOST: ${{ secrets.NAS_HOST }}
+          NAS_PORT: ${{ secrets.NAS_PORT }}
+          NAS_USER: ${{ secrets.NAS_USER }}

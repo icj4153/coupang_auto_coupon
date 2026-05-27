@@ -1,0 +1,41 @@
+{
+  "wing_url": "https://wing.coupang.com",
+  "coupon_page_url": "https://wing.coupang.com/front/seller-promotion-platform/sfc/coupon/new/coupon-apply",
+  "browser_profile_dir": ".playwright-wing-profile",
+  "storage_state_path": "/data/wing_storage_state.server.json",
+  "browser_channel": "",
+  "headless": true,
+  "slow_mo_ms": 0,
+  "navigation_texts": [
+    "프로모션",
+    "프로모션 관리",
+    "할인쿠폰 관리",
+    "쿠폰 관리",
+    "Manage Discount Coupons"
+  ],
+  "create_button_texts": [
+    "할인쿠폰 만들기",
+    "쿠폰 만들기",
+    "쿠폰 생성",
+    "할인쿠폰 생성",
+    "Create Coupon",
+    "Create a Discount Coupon"
+  ],
+  "submit_button_texts": [
+    "저장",
+    "등록",
+    "생성",
+    "확인",
+    "Create",
+    "Submit"
+  ],
+  "selectors": {
+    "coupon_name": "",
+    "start_date": "",
+    "end_date": "",
+    "discount": "",
+    "max_discount_price": "",
+    "min_order_price": "",
+    "vendor_item_ids": ""
+  }
+}
