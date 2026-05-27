@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import datetime as dt
+import hmac
 import html
 import json
 import os
@@ -62,6 +64,34 @@ DISCOUNT_TYPE_LABELS = {
     "PRICE": "정액",
     "RATE": "정률",
 }
+
+
+def web_auth_credentials() -> tuple[str, str]:
+    return (
+        os.environ.get("COUPON_WEB_USER", "").strip(),
+        os.environ.get("COUPON_WEB_PASSWORD", ""),
+    )
+
+
+def web_auth_enabled() -> bool:
+    username, password = web_auth_credentials()
+    return bool(username and password)
+
+
+def valid_basic_auth(header: str | None) -> bool:
+    if not web_auth_enabled() or not header or not header.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header.removeprefix("Basic ").strip()).decode("utf-8")
+    except Exception:
+        return False
+    username, separator, password = decoded.partition(":")
+    expected_username, expected_password = web_auth_credentials()
+    return (
+        bool(separator)
+        and hmac.compare_digest(username, expected_username)
+        and hmac.compare_digest(password, expected_password)
+    )
 
 
 def now_stamp() -> str:
@@ -1094,11 +1124,29 @@ def page_html(
 
 
 class Handler(BaseHTTPRequestHandler):
+    def require_auth(self) -> bool:
+        if not web_auth_enabled():
+            return True
+        if valid_basic_auth(self.headers.get("Authorization")):
+            return True
+        body = "Authentication required.".encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="Coupang Coupon"')
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
     def do_GET(self) -> None:
+        if not self.require_auth():
+            return
         coupons, products = load_state()
         self.respond(page_html(coupons, products))
 
     def do_POST(self) -> None:
+        if not self.require_auth():
+            return
         length = int(self.headers.get("Content-Length", "0"))
         data = self.rfile.read(length).decode("utf-8")
         parsed = urllib.parse.parse_qs(data)

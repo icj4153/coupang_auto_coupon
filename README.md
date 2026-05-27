@@ -116,10 +116,37 @@ sh nas_update.sh
 ```bash
 COUPANG_WING_ID=쿠팡WING아이디
 COUPANG_WING_PASSWORD=쿠팡WING비밀번호
+COUPON_WEB_USER=admin
+COUPON_WEB_PASSWORD=긴_랜덤_비밀번호
 COUPON_WEB_BIND=127.0.0.1
 ```
 
-`COUPON_WEB_BIND=127.0.0.1`이면 NAS 내부 또는 리버스 프록시를 통해서만 웹 UI에 접근합니다. 내부망에서 직접 접속해야 하면 `0.0.0.0`으로 바꿀 수 있지만, 로그인 정보가 걸린 도구라 외부 공개는 피하는 편이 좋습니다.
+`COUPON_WEB_USER`와 `COUPON_WEB_PASSWORD`가 설정되어 있으면 웹폼 접속 시 브라우저 기본 로그인 창이 먼저 뜹니다. 외부에서 웹폼을 열 계획이면 반드시 긴 랜덤 비밀번호를 설정하세요.
+
+`COUPON_WEB_BIND=127.0.0.1`이면 NAS 내부 또는 리버스 프록시를 통해서만 웹 UI에 접근합니다.
+
+Synology가 `icj7297.synology.me:443` 규칙 중복을 막는 경우에는, 같은 도메인에 별도 HTTPS 포트를 쓰는 방식이 가장 간단합니다.
+
+라우터 포트포워딩:
+
+```text
+외부 TCP 8766 -> 192.168.50.101 TCP 8766
+```
+
+Synology 역방향 프록시 규칙:
+
+```text
+소스: HTTPS / icj7297.synology.me / 8766
+대상: HTTP  / 127.0.0.1          / 8765
+```
+
+접속 주소:
+
+```text
+https://icj7297.synology.me:8766
+```
+
+이 방식은 기존 `https://icj7297.synology.me` B2B 규칙을 건드리지 않고 쿠팡 웹폼만 별도 포트로 노출합니다.
 
 GitHub Secrets는 기존 `b2b_excel`과 같은 이름을 씁니다.
 
