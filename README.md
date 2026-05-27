@@ -1,4 +1,4 @@
-# Coupang WING Coupon Browser Automation
+# coupang_auto_coupon
 
 스윕 같은 발주 자동화 서비스를 유지한 채, 쿠팡 WING 화면을 Playwright 브라우저 자동화로 조작해 하루짜리 쿠폰 발급을 돕는 스크립트입니다.
 
