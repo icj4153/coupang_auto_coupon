@@ -10,14 +10,10 @@ import hmac
 import html
 import json
 import os
-import plistlib
-import shlex
 import subprocess
 import sys
-import threading
 import urllib.parse
 import uuid
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -33,10 +29,6 @@ PRODUCTS_PATH = DATA_DIR / "coupon_products.json"
 GENERATED_CSV_PATH = DATA_DIR / "browser_coupons.generated.csv"
 LOG_DIR = Path(os.environ.get("COUPON_LOG_DIR", DATA_DIR / "logs")).expanduser()
 KST = ZoneInfo("Asia/Seoul")
-OSASCRIPT = Path("/usr/bin/osascript")
-LAUNCHCTL = Path("/bin/launchctl")
-LAUNCH_AGENT_LABEL = "com.joon.coupang-coupon"
-LAUNCH_AGENT_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCH_AGENT_LABEL}.plist"
 
 DEFAULT_COUPON = {
     "campaign_name": "오늘만 특가",
@@ -401,169 +393,8 @@ def run_automation(coupons: list[dict[str, str]], submit: bool) -> tuple[int, st
     return completed.returncode, completed.stdout
 
 
-def launch_login_setup_terminal() -> tuple[bool, str]:
-    command = (
-        f"cd {shlex.quote(str(ROOT))} && "
-        "python3 wing_coupon_browser.py --config browser_coupon_config.json --setup-login; "
-        "status=$?; "
-        "echo; "
-        "if [ $status -eq 0 ]; then "
-        "echo '[wing-coupon] 로그인 세션 저장이 완료되었습니다.'; "
-        "else "
-        "echo '[wing-coupon] 로그인 세션 저장에 실패했습니다. 위 메시지를 확인하세요.'; "
-        "fi; "
-        "echo; "
-        "read -r -p '확인 후 Enter를 누르면 이 터미널 창을 닫아도 됩니다. '"
-    )
-    script = [
-        "on run argv",
-        'tell application "Terminal"',
-        "activate",
-        "do script (item 1 of argv)",
-        "end tell",
-        "end run",
-    ]
-    try:
-        completed = subprocess.run(
-            [str(OSASCRIPT), *[arg for line in script for arg in ("-e", line)], command],
-            cwd=ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=10,
-        )
-    except FileNotFoundError:
-        return False, "macOS Terminal 실행 도구(osascript)를 찾을 수 없습니다."
-    except subprocess.TimeoutExpired:
-        return False, "Terminal 실행 요청이 시간 초과되었습니다."
-
-    if completed.returncode != 0:
-        return False, completed.stdout.strip() or "Terminal 실행에 실패했습니다."
-    return True, (
-        "로그인 세션 만들기 Terminal 창을 열었습니다.\n"
-        "열린 Chrome에서 쿠팡 WING에 로그인한 뒤, Terminal 안내에 따라 Enter를 누르면 세션이 저장됩니다."
-    )
-
-
-def save_keychain_credentials(login_id: str, password: str) -> tuple[bool, str]:
-    try:
-        wing_credentials.save_credentials(login_id, password)
-    except wing_credentials.CredentialError as exc:
-        return False, str(exc)
-    return True, "로그인 정보를 macOS Keychain에 저장했습니다."
-
-
-def macos_desktop_supported() -> bool:
-    return sys.platform == "darwin" and OSASCRIPT.exists()
-
-
-def launchd_supported() -> bool:
-    return sys.platform == "darwin" and LAUNCHCTL.exists()
-
-
-def external_scheduler_mode() -> str:
-    return os.environ.get("COUPON_SCHEDULER_MODE", "").strip().lower()
-
-
-def uses_external_scheduler() -> bool:
-    return external_scheduler_mode() in {"docker", "nas", "external"} or not launchd_supported()
-
-
-def launchd_domain() -> str:
-    return f"gui/{os.getuid()}"
-
-
-def schedule_is_installed() -> bool:
-    if uses_external_scheduler():
-        return True
-    return LAUNCH_AGENT_PATH.exists()
-
-
-def schedule_is_loaded() -> bool:
-    if uses_external_scheduler() or not LAUNCHCTL.exists():
-        return False
-    completed = subprocess.run(
-        [str(LAUNCHCTL), "print", f"{launchd_domain()}/{LAUNCH_AGENT_LABEL}"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    return completed.returncode == 0
-
-
-def launchd_plist() -> dict[str, object]:
-    return {
-        "Label": LAUNCH_AGENT_LABEL,
-        "ProgramArguments": [
-            "/usr/bin/env",
-            "python3",
-            str(ROOT / "daily_coupon_runner.py"),
-            "--run",
-        ],
-        "WorkingDirectory": str(ROOT),
-        "StartCalendarInterval": {"Hour": 0, "Minute": 1},
-        "StandardOutPath": str(LOG_DIR / "daily_coupon_launchd.out.log"),
-        "StandardErrorPath": str(LOG_DIR / "daily_coupon_launchd.err.log"),
-        "EnvironmentVariables": {
-            "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-        },
-    }
-
-
-def install_daily_schedule() -> tuple[bool, str]:
-    if uses_external_scheduler():
-        return True, (
-            "NAS/Docker 환경에서는 매일 실행을 coupang-coupon-scheduler 컨테이너가 담당합니다. "
-            "설치 버튼을 누를 필요가 없습니다."
-        )
-    LOG_DIR.mkdir(exist_ok=True)
-    LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with LAUNCH_AGENT_PATH.open("wb") as handle:
-        plistlib.dump(launchd_plist(), handle, sort_keys=False)
-
-    if not LAUNCHCTL.exists():
-        return False, "launchctl을 찾을 수 없습니다: /bin/launchctl"
-
-    subprocess.run(
-        [str(LAUNCHCTL), "bootout", launchd_domain(), str(LAUNCH_AGENT_PATH)],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    completed = subprocess.run(
-        [str(LAUNCHCTL), "bootstrap", launchd_domain(), str(LAUNCH_AGENT_PATH)],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    if completed.returncode != 0:
-        return False, completed.stdout.strip() or "launchd 자동 실행 등록에 실패했습니다."
-
-    subprocess.run(
-        [str(LAUNCHCTL), "enable", f"{launchd_domain()}/{LAUNCH_AGENT_LABEL}"],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    return True, "매일 00:01 자동 실행을 설치했습니다. Mac이 켜져 있고 로그인된 상태여야 실행됩니다."
-
-
-def uninstall_daily_schedule() -> tuple[bool, str]:
-    if uses_external_scheduler():
-        return True, (
-            "NAS/Docker 환경에서는 자동 실행 해제가 웹 버튼이 아니라 scheduler 컨테이너 중지로 처리됩니다. "
-            "필요하면 docker-compose stop coupang-coupon-scheduler를 사용하세요."
-        )
-    if LAUNCHCTL.exists() and LAUNCH_AGENT_PATH.exists():
-        subprocess.run(
-            [str(LAUNCHCTL), "bootout", launchd_domain(), str(LAUNCH_AGENT_PATH)],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-    if LAUNCH_AGENT_PATH.exists():
-        LAUNCH_AGENT_PATH.unlink()
-    return True, "매일 자동 실행을 해제했습니다."
+def scheduler_time() -> str:
+    return os.environ.get("COUPON_DAILY_TIME", "00:01").strip() or "00:01"
 
 
 def esc(value: object) -> str:
@@ -791,36 +622,6 @@ def product_modal_html(product: dict[str, str], show_modal: bool) -> str:
     """
 
 
-def credential_modal_html(show_modal: bool) -> str:
-    open_attr = "open" if show_modal else ""
-    return f"""
-    <dialog id="credential-modal" {open_attr}>
-      <form id="credential-form" method="post">
-        <input type="hidden" name="action" value="save_credentials">
-        <div class="modal-head">
-          <div>
-            <h2>로그인 정보 저장</h2>
-            <p>쿠팡 WING ID/PW는 파일이 아니라 macOS Keychain에 저장됩니다.</p>
-          </div>
-          <button class="icon-button" type="button" data-close-credential-modal aria-label="닫기">×</button>
-        </div>
-
-        <label for="login_id">WING 로그인 ID</label>
-        <input id="login_id" name="login_id" autocomplete="username" required>
-
-        <label for="login_password">WING 비밀번호</label>
-        <input id="login_password" name="login_password" type="password" autocomplete="current-password" required>
-        <div class="hint">자동 실행 중 추가 인증/보안 확인이 뜨면 해당 실행은 실패 로그를 남기고 멈춥니다.</div>
-
-        <div class="modal-actions">
-          <button class="save" type="button" data-close-credential-modal>취소</button>
-          <button class="submit" type="submit">Keychain에 저장</button>
-        </div>
-      </form>
-    </dialog>
-    """
-
-
 def page_html(
     coupons: list[dict[str, str]],
     products: list[dict[str, str]],
@@ -831,7 +632,6 @@ def page_html(
     show_modal: bool = False,
     modal_product: dict[str, str] | None = None,
     show_product_modal: bool = False,
-    show_credential_modal: bool = False,
 ) -> bytes:
     target_date = dt.datetime.now(KST).date() + dt.timedelta(days=1)
     message_html = f"<div class='notice'>{esc(message)}</div>" if message else ""
@@ -841,44 +641,17 @@ def page_html(
     option_total = sum(option_count(product) for product in products)
     modal_html = modal_form_html(modal_coupon or DEFAULT_COUPON, products, show_modal)
     product_modal = product_modal_html(modal_product or DEFAULT_PRODUCT, show_product_modal)
-    credential_modal = credential_modal_html(show_credential_modal)
     product_rows = product_rows_html(products)
     rows_html = coupon_rows_html(coupons, products, target_date)
     credential_source = wing_credentials.credential_source()
     credential_status = {
         "environment": "환경변수",
-        "keychain": "저장됨",
-    }.get(credential_source, "미저장")
-    if uses_external_scheduler():
-        daily_time = os.environ.get("COUPON_DAILY_TIME", "00:01")
-        schedule_status = "컨테이너"
-        schedule_loaded = f"{daily_time} 대기"
-        schedule_label = "스케줄러"
-        schedule_actions_html = "<span class='status-pill'>NAS 자동 실행 사용 중</span>"
-    else:
-        schedule_status = "설치됨" if schedule_is_installed() else "미설치"
-        schedule_loaded = "로드됨" if schedule_is_loaded() else "대기"
-        schedule_label = "launchd 상태"
-        schedule_actions_html = """
-        <form class="inline-form" method="post">
-          <button class="session" type="submit" name="action" value="install_schedule">매일 00:01 자동 실행 설치</button>
-        </form>
-        <form class="inline-form" method="post">
-          <button class="delete" type="submit" name="action" value="uninstall_schedule">자동 실행 해제</button>
-        </form>
-        """
-    if external_scheduler_mode() and credential_source == "environment":
-        login_actions_html = "<span class='status-pill'>환경변수 로그인 사용 중</span>"
-    elif external_scheduler_mode():
-        login_actions_html = "<span class='status-pill warning'>.env 로그인 필요</span>"
-    elif macos_desktop_supported():
-        login_actions_html = """
-        <button class="session" type="button" data-open-credential-modal>로그인 정보 저장</button>
-        <form class="inline-form" method="post">
-          <button class="session" type="submit" name="action" value="setup_login">수동 로그인</button>
-        </form>
-        """
-    elif credential_source == "environment":
+    }.get(credential_source, "미설정")
+    schedule_status = "컨테이너"
+    schedule_loaded = f"{scheduler_time()} 대기"
+    schedule_label = "스케줄러"
+    schedule_actions_html = "<span class='status-pill'>NAS 자동 실행 사용 중</span>"
+    if credential_source == "environment":
         login_actions_html = "<span class='status-pill'>환경변수 로그인 사용 중</span>"
     else:
         login_actions_html = "<span class='status-pill warning'>.env 로그인 필요</span>"
@@ -891,7 +664,7 @@ def page_html(
   <style>
     :root {{
       color-scheme: light;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-family: system-ui, "Segoe UI", sans-serif;
       background: #f4f6f8;
       color: #1d2733;
     }}
@@ -1045,20 +818,16 @@ def page_html(
 
     {modal_html}
     {product_modal}
-    {credential_modal}
     {output_html}
   </main>
 
   <script>
     var modal = document.getElementById('coupon-modal');
     var productModal = document.getElementById('product-modal');
-    var credentialModal = document.getElementById('credential-modal');
     var openButtons = document.querySelectorAll('[data-open-modal]');
     var openProductButtons = document.querySelectorAll('[data-open-product-modal]');
-    var openCredentialButtons = document.querySelectorAll('[data-open-credential-modal]');
     var closeButtons = document.querySelectorAll('[data-close-modal]');
     var closeProductButtons = document.querySelectorAll('[data-close-product-modal]');
-    var closeCredentialButtons = document.querySelectorAll('[data-close-credential-modal]');
     openButtons.forEach(function (button) {{
       button.addEventListener('click', function () {{
         if (modal.showModal) modal.showModal();
@@ -1081,18 +850,6 @@ def page_html(
       button.addEventListener('click', function () {{
         if (productModal.close) productModal.close();
         else productModal.removeAttribute('open');
-      }});
-    }});
-    openCredentialButtons.forEach(function (button) {{
-      button.addEventListener('click', function () {{
-        if (credentialModal.showModal) credentialModal.showModal();
-        else credentialModal.setAttribute('open', 'open');
-      }});
-    }});
-    closeCredentialButtons.forEach(function (button) {{
-      button.addEventListener('click', function () {{
-        if (credentialModal.close) credentialModal.close();
-        else credentialModal.removeAttribute('open');
       }});
     }});
 
@@ -1215,72 +972,6 @@ class Handler(BaseHTTPRequestHandler):
         coupons, products = load_state()
         action = parsed.get("action", [""])[0]
 
-        if action == "setup_login":
-            if not macos_desktop_supported():
-                self.respond(
-                    page_html(
-                        coupons,
-                        products,
-                        "NAS/Docker 환경에서는 수동 로그인 세션 저장을 사용하지 않습니다. .env의 COUPANG_WING_ID/PASSWORD로 매일 새 로그인합니다.",
-                    )
-                )
-                return
-            ok, output = launch_login_setup_terminal()
-            message = "로그인 세션 만들기를 시작했습니다." if ok else "로그인 세션 만들기 실행에 실패했습니다."
-            self.respond(page_html(coupons, products, message, output), status=200 if ok else 500)
-            return
-
-        if action == "save_credentials":
-            if not macos_desktop_supported():
-                self.respond(
-                    page_html(
-                        coupons,
-                        products,
-                        "NAS/Docker 환경에서는 웹에서 Keychain 저장을 사용하지 않습니다. /volume1/docker/coupang_coupon/.env를 수정하세요.",
-                    )
-                )
-                return
-            login_id = parsed.get("login_id", [""])[0]
-            password = parsed.get("login_password", [""])[0]
-            ok, output = save_keychain_credentials(login_id, password)
-            message = "로그인 정보를 저장했습니다." if ok else "로그인 정보 저장에 실패했습니다."
-            self.respond(
-                page_html(coupons, products, message, output, show_credential_modal=not ok),
-                status=200 if ok else 400,
-            )
-            return
-
-        if action == "install_schedule":
-            if uses_external_scheduler():
-                ok, output = install_daily_schedule()
-                self.respond(page_html(coupons, products, "NAS 자동 실행은 스케줄러 컨테이너가 담당합니다.", output))
-                return
-            if not wing_credentials.has_credentials():
-                self.respond(
-                    page_html(
-                        coupons,
-                        products,
-                        "자동 실행 전에 로그인 정보를 먼저 저장하세요.",
-                        show_credential_modal=True,
-                    ),
-                    status=400,
-                )
-                return
-            ok, output = install_daily_schedule()
-            message = "자동 실행을 설치했습니다." if ok else "자동 실행 설치에 실패했습니다."
-            self.respond(page_html(coupons, products, message, output), status=200 if ok else 500)
-            return
-
-        if action == "uninstall_schedule":
-            if uses_external_scheduler():
-                ok, output = uninstall_daily_schedule()
-                self.respond(page_html(coupons, products, "NAS 자동 실행은 docker-compose로 관리합니다.", output))
-                return
-            ok, output = uninstall_daily_schedule()
-            message = "자동 실행을 해제했습니다." if ok else "자동 실행 해제에 실패했습니다."
-            self.respond(page_html(coupons, products, message, output), status=200 if ok else 500)
-            return
-
         if "delete_product_id" in parsed:
             delete_id = parsed["delete_product_id"][0]
             if any(coupon.get("product_id") == delete_id for coupon in coupons):
@@ -1366,8 +1057,6 @@ def main() -> int:
     display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
     url = f"http://{display_host}:{port}"
     print(f"쿠폰 자동화 웹폼: {url}")
-    if os.environ.get("COUPON_OPEN_BROWSER", "true").strip().lower() not in {"0", "false", "no", "off"}:
-        threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

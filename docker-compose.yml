@@ -16,7 +16,6 @@ services:
       COUPON_ARTIFACT_DIR: /data/browser_artifacts
       COUPON_BIND_HOST: 0.0.0.0
       COUPON_PORT: 8765
-      COUPON_OPEN_BROWSER: "false"
       COUPON_SCHEDULER_MODE: docker
       COUPON_DAILY_TIME: "00:01"
     ports:

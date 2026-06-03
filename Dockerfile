@@ -8,8 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
     COUPON_CONFIG_PATH=/data/browser_coupon_config.json \
     COUPON_ARTIFACT_DIR=/data/browser_artifacts \
     COUPON_BIND_HOST=0.0.0.0 \
-    COUPON_PORT=8765 \
-    COUPON_OPEN_BROWSER=false
+    COUPON_PORT=8765
 
 COPY requirements.txt ./
 RUN python3 -m pip install --no-cache-dir -r requirements.txt

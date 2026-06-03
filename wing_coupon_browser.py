@@ -657,7 +657,7 @@ def fill_login_field(page: Page, selectors: list[str], value: str, label: str) -
 def attempt_auto_login(page: Page, context: BrowserContext, config: dict[str, Any]) -> bool:
     login_id, password = load_credentials()
     if not login_id or not password:
-        log("No WING login credentials found in environment variables or Keychain.")
+        log("No WING login credentials found in environment variables.")
         return False
 
     if not looks_like_login(page):
@@ -689,7 +689,7 @@ def attempt_auto_login(page: Page, context: BrowserContext, config: dict[str, An
     save_artifacts(page, "auto_login_failed")
     raise AutomationError(
         "Auto-login did not complete. Coupang may be asking for additional verification. "
-        "Open the saved browser artifact or run --setup-login manually."
+        "Open the saved browser artifact and check whether additional verification is required."
     )
 
 
@@ -698,24 +698,7 @@ def ensure_logged_in(page: Page, context: BrowserContext, config: dict[str, Any]
         return
     if auto_login and attempt_auto_login(page, context, config):
         return
-    raise AutomationError("Login session expired. Run --setup-login again or save WING ID/PW in the web UI.")
-
-
-def wait_for_login(page: Page) -> None:
-    log("브라우저가 열리면 쿠팡 WING에 로그인하세요.")
-    log("로그인 후 메인/대시보드 화면이 완전히 보일 때까지 기다린 다음 터미널에서 Enter를 누르세요.")
-    input()
-    page.wait_for_load_state("domcontentloaded")
-    page.wait_for_timeout(2500)
-    log(f"Login setup check at: {page.title()} / {page.url}")
-    log(f"Coupang cookies in profile: {len(wing_cookies(page.context))}")
-    save_artifacts(page, "login_setup_finished")
-    if looks_like_login(page):
-        raise AutomationError(
-            "Still appears to be on the login page. "
-            "Complete login until the WING main page is visible, then run --setup-login again."
-        )
-    log("Login page was not detected.")
+    raise AutomationError("Login session expired. Set COUPANG_WING_ID and COUPANG_WING_PASSWORD in .env.")
 
 
 def save_storage_state(context: BrowserContext, config: dict[str, Any]) -> None:
@@ -739,7 +722,7 @@ def inspect_session(page: Page, config: dict[str, Any]) -> None:
     log(f"Session page: {page.title()} / {page.url}")
     log(f"Coupang cookies in profile: {len(wing_cookies(page.context))}")
     if looks_like_login(page):
-        log("This still looks like the login page. Run --setup-login again and press Enter only after the WING main page is visible.")
+        log("This still looks like the login page. Check COUPANG_WING_ID and COUPANG_WING_PASSWORD in .env.")
     else:
         log("This does not look like the login page.")
     save_artifacts(page, "inspect_session")
@@ -805,14 +788,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--target-date", help="Coupon date YYYY-MM-DD. Defaults to tomorrow in KST.")
     parser.add_argument("--days", type=int, default=1, help="Create one coupon per day starting at target date.")
     parser.add_argument("--append-date-suffix", action="store_true", help="Append MM/DD to coupon names.")
-    parser.add_argument("--setup-login", action="store_true", help="Open WING and wait for manual login.")
     parser.add_argument("--inspect", action="store_true", help="Open WING, print URL/title, save screenshot, then wait.")
     parser.add_argument("--manual-coupon-page", action="store_true", help="Let the user navigate to the coupon page before automation.")
     parser.add_argument("--submit", action="store_true", help="Actually click the final submit button.")
     parser.add_argument(
         "--auto-login",
         action="store_true",
-        help="Use WING credentials from environment variables or Keychain when login is needed.",
+        help="Use WING credentials from environment variables when login is needed.",
     )
     parser.add_argument(
         "--fresh-login",
@@ -855,7 +837,7 @@ def main() -> int:
     csv_path = Path(args.csv)
     if not config_path.exists():
         raise AutomationError(f"Missing config file: {config_path}")
-    if not csv_path.exists() and not args.setup_login:
+    if not csv_path.exists():
         raise AutomationError(f"Missing CSV file: {csv_path}")
 
     config = load_json(config_path)
@@ -879,32 +861,16 @@ def main() -> int:
 
     with sync_playwright() as p:
         browser: Browser | None = None
-        if args.setup_login:
-            launch_options = {
-                "user_data_dir": config.get("browser_profile_dir", ".playwright-wing-profile"),
-                **browser_launch_options(config),
-                "viewport": {"width": 1440, "height": 950},
-            }
-            log(f"Using browser profile: {Path(launch_options['user_data_dir']).resolve()}")
-            if config.get("browser_channel", "").strip():
-                log(f"Using browser channel: {config.get('browser_channel')}")
-            context: BrowserContext = p.chromium.launch_persistent_context(**launch_options)
-        else:
-            launch_options = browser_launch_options(config)
-            if config.get("browser_channel", "").strip():
-                log(f"Using browser channel: {config.get('browser_channel')}")
-            browser = p.chromium.launch(**launch_options)
-            if args.fresh_login:
-                log("Fresh login mode enabled. Saved browser storage state will be ignored for this run.")
-            context = browser.new_context(**new_context_options(config, use_storage_state=not args.fresh_login))
+        launch_options = browser_launch_options(config)
+        if config.get("browser_channel", "").strip():
+            log(f"Using browser channel: {config.get('browser_channel')}")
+        browser = p.chromium.launch(**launch_options)
+        if args.fresh_login:
+            log("Fresh login mode enabled. Saved browser storage state will be ignored for this run.")
+        context = browser.new_context(**new_context_options(config, use_storage_state=not args.fresh_login))
         page = context.pages[0] if context.pages else context.new_page()
         page.bring_to_front()
         try:
-            if args.setup_login:
-                page.goto(config.get("wing_url", "https://wing.coupang.com"), wait_until="domcontentloaded")
-                wait_for_login(page)
-                save_storage_state(context, config)
-                return 0
             if args.inspect:
                 inspect_session(page, config)
                 return 0
