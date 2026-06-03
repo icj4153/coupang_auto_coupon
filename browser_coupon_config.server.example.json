@@ -3,7 +3,7 @@
   "coupon_page_url": "https://wing.coupang.com/front/seller-promotion-platform/sfc/coupon/new/coupon-apply",
   "browser_profile_dir": ".playwright-wing-profile",
   "storage_state_path": "/data/wing_storage_state.server.json",
-  "browser_channel": "",
+  "browser_channel": "chrome",
   "headless": true,
   "slow_mo_ms": 0,
   "locale": "ko-KR",

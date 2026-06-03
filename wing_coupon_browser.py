@@ -843,10 +843,14 @@ def browser_launch_options(config: dict[str, Any]) -> dict[str, Any]:
     launch_args = config.get("launch_args", ["--disable-blink-features=AutomationControlled"])
     if isinstance(launch_args, list):
         options["args"] = [str(arg) for arg in launch_args if str(arg).strip()]
-    browser_channel = config.get("browser_channel", "").strip()
+    browser_channel = str(config.get("browser_channel") or os.environ.get("COUPON_BROWSER_CHANNEL", "")).strip()
     if browser_channel:
         options["channel"] = browser_channel
     return options
+
+
+def selected_browser_channel(config: dict[str, Any]) -> str:
+    return str(config.get("browser_channel") or os.environ.get("COUPON_BROWSER_CHANNEL", "")).strip()
 
 
 def new_context_options(config: dict[str, Any], *, use_storage_state: bool) -> dict[str, Any]:
@@ -916,8 +920,9 @@ def main() -> int:
     with sync_playwright() as p:
         browser: Browser | None = None
         launch_options = browser_launch_options(config)
-        if config.get("browser_channel", "").strip():
-            log(f"Using browser channel: {config.get('browser_channel')}")
+        browser_channel = selected_browser_channel(config)
+        if browser_channel:
+            log(f"Using browser channel: {browser_channel}")
         browser = p.chromium.launch(**launch_options)
         if args.fresh_login:
             log("Fresh login mode enabled. Saved browser storage state will be ignored for this run.")

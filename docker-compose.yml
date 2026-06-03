@@ -18,6 +18,7 @@ services:
       COUPON_PORT: 8765
       COUPON_SCHEDULER_MODE: docker
       COUPON_DAILY_TIME: "00:01"
+      COUPON_BROWSER_CHANNEL: chrome
     ports:
       - "${COUPON_WEB_BIND:-127.0.0.1}:8765:8765"
     volumes:
@@ -41,5 +42,6 @@ services:
       COUPON_ARTIFACT_DIR: /data/browser_artifacts
       COUPON_SCHEDULER_MODE: docker
       COUPON_DAILY_TIME: "00:01"
+      COUPON_BROWSER_CHANNEL: chrome
     volumes:
       - ./data:/data
