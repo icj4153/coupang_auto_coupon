@@ -453,16 +453,34 @@ def save_keychain_credentials(login_id: str, password: str) -> tuple[bool, str]:
     return True, "로그인 정보를 macOS Keychain에 저장했습니다."
 
 
+def macos_desktop_supported() -> bool:
+    return sys.platform == "darwin" and OSASCRIPT.exists()
+
+
+def launchd_supported() -> bool:
+    return sys.platform == "darwin" and LAUNCHCTL.exists()
+
+
+def external_scheduler_mode() -> str:
+    return os.environ.get("COUPON_SCHEDULER_MODE", "").strip().lower()
+
+
+def uses_external_scheduler() -> bool:
+    return external_scheduler_mode() in {"docker", "nas", "external"} or not launchd_supported()
+
+
 def launchd_domain() -> str:
     return f"gui/{os.getuid()}"
 
 
 def schedule_is_installed() -> bool:
+    if uses_external_scheduler():
+        return True
     return LAUNCH_AGENT_PATH.exists()
 
 
 def schedule_is_loaded() -> bool:
-    if not LAUNCHCTL.exists():
+    if uses_external_scheduler() or not LAUNCHCTL.exists():
         return False
     completed = subprocess.run(
         [str(LAUNCHCTL), "print", f"{launchd_domain()}/{LAUNCH_AGENT_LABEL}"],
@@ -493,6 +511,11 @@ def launchd_plist() -> dict[str, object]:
 
 
 def install_daily_schedule() -> tuple[bool, str]:
+    if uses_external_scheduler():
+        return True, (
+            "NAS/Docker 환경에서는 매일 실행을 coupang-coupon-scheduler 컨테이너가 담당합니다. "
+            "설치 버튼을 누를 필요가 없습니다."
+        )
     LOG_DIR.mkdir(exist_ok=True)
     LAUNCH_AGENT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LAUNCH_AGENT_PATH.open("wb") as handle:
@@ -526,6 +549,11 @@ def install_daily_schedule() -> tuple[bool, str]:
 
 
 def uninstall_daily_schedule() -> tuple[bool, str]:
+    if uses_external_scheduler():
+        return True, (
+            "NAS/Docker 환경에서는 자동 실행 해제가 웹 버튼이 아니라 scheduler 컨테이너 중지로 처리됩니다. "
+            "필요하면 docker-compose stop coupang-coupon-scheduler를 사용하세요."
+        )
     if LAUNCHCTL.exists() and LAUNCH_AGENT_PATH.exists():
         subprocess.run(
             [str(LAUNCHCTL), "bootout", launchd_domain(), str(LAUNCH_AGENT_PATH)],
@@ -821,8 +849,39 @@ def page_html(
         "environment": "환경변수",
         "keychain": "저장됨",
     }.get(credential_source, "미저장")
-    schedule_status = "설치됨" if schedule_is_installed() else "미설치"
-    schedule_loaded = "로드됨" if schedule_is_loaded() else "대기"
+    if uses_external_scheduler():
+        daily_time = os.environ.get("COUPON_DAILY_TIME", "00:01")
+        schedule_status = "컨테이너"
+        schedule_loaded = f"{daily_time} 대기"
+        schedule_label = "스케줄러"
+        schedule_actions_html = "<span class='status-pill'>NAS 자동 실행 사용 중</span>"
+    else:
+        schedule_status = "설치됨" if schedule_is_installed() else "미설치"
+        schedule_loaded = "로드됨" if schedule_is_loaded() else "대기"
+        schedule_label = "launchd 상태"
+        schedule_actions_html = """
+        <form class="inline-form" method="post">
+          <button class="session" type="submit" name="action" value="install_schedule">매일 00:01 자동 실행 설치</button>
+        </form>
+        <form class="inline-form" method="post">
+          <button class="delete" type="submit" name="action" value="uninstall_schedule">자동 실행 해제</button>
+        </form>
+        """
+    if external_scheduler_mode() and credential_source == "environment":
+        login_actions_html = "<span class='status-pill'>환경변수 로그인 사용 중</span>"
+    elif external_scheduler_mode():
+        login_actions_html = "<span class='status-pill warning'>.env 로그인 필요</span>"
+    elif macos_desktop_supported():
+        login_actions_html = """
+        <button class="session" type="button" data-open-credential-modal>로그인 정보 저장</button>
+        <form class="inline-form" method="post">
+          <button class="session" type="submit" name="action" value="setup_login">수동 로그인</button>
+        </form>
+        """
+    elif credential_source == "environment":
+        login_actions_html = "<span class='status-pill'>환경변수 로그인 사용 중</span>"
+    else:
+        login_actions_html = "<span class='status-pill warning'>.env 로그인 필요</span>"
     body = f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -876,6 +935,8 @@ def page_html(
     .secondary {{ background: #1f8a70; color: #fff; }}
     .test {{ background: #26384d; color: #fff; }}
     .session {{ background: #eef1f5; color: #26384d; }}
+    .status-pill {{ display: inline-flex; align-items: center; min-height: 24px; border-radius: 999px; padding: 9px 12px; background: #eef4ff; color: #174ea6; font-size: 13px; font-weight: 800; }}
+    .status-pill.warning {{ background: #fff8d8; color: #8a5b00; }}
     .save {{ background: #e7ebf0; color: #1d2733; }}
     .delete {{ background: #fff0ee; color: #bf2a17; padding: 9px 11px; }}
     .notice {{ margin: 0 0 16px; padding: 12px 14px; background: #fff8d8; border: 1px solid #ead47a; border-radius: 8px; }}
@@ -917,16 +978,8 @@ def page_html(
         <p class="sub">저장된 쿠폰을 선택해서 내일({target_date:%Y-%m-%d}) 쿠폰만 생성합니다.</p>
       </div>
       <div class="top-actions">
-        <button class="session" type="button" data-open-credential-modal>로그인 정보 저장</button>
-        <form class="inline-form" method="post">
-          <button class="session" type="submit" name="action" value="setup_login">수동 로그인</button>
-        </form>
-        <form class="inline-form" method="post">
-          <button class="session" type="submit" name="action" value="install_schedule">매일 00:01 자동 실행 설치</button>
-        </form>
-        <form class="inline-form" method="post">
-          <button class="delete" type="submit" name="action" value="uninstall_schedule">자동 실행 해제</button>
-        </form>
+        {login_actions_html}
+        {schedule_actions_html}
         <button class="secondary" type="button" data-open-product-modal>상품 추가</button>
         <button class="primary" type="button" data-open-modal>쿠폰 추가</button>
       </div>
@@ -940,7 +993,7 @@ def page_html(
       <div class="stat"><strong>{target_date:%m/%d}</strong><span>생성일</span></div>
       <div class="stat"><strong>{credential_status}</strong><span>로그인 정보</span></div>
       <div class="stat"><strong>{schedule_status}</strong><span>자동 실행</span></div>
-      <div class="stat"><strong>{schedule_loaded}</strong><span>launchd 상태</span></div>
+      <div class="stat"><strong>{schedule_loaded}</strong><span>{schedule_label}</span></div>
     </div>
 
     {message_html}
@@ -1163,12 +1216,30 @@ class Handler(BaseHTTPRequestHandler):
         action = parsed.get("action", [""])[0]
 
         if action == "setup_login":
+            if not macos_desktop_supported():
+                self.respond(
+                    page_html(
+                        coupons,
+                        products,
+                        "NAS/Docker 환경에서는 수동 로그인 세션 저장을 사용하지 않습니다. .env의 COUPANG_WING_ID/PASSWORD로 매일 새 로그인합니다.",
+                    )
+                )
+                return
             ok, output = launch_login_setup_terminal()
             message = "로그인 세션 만들기를 시작했습니다." if ok else "로그인 세션 만들기 실행에 실패했습니다."
             self.respond(page_html(coupons, products, message, output), status=200 if ok else 500)
             return
 
         if action == "save_credentials":
+            if not macos_desktop_supported():
+                self.respond(
+                    page_html(
+                        coupons,
+                        products,
+                        "NAS/Docker 환경에서는 웹에서 Keychain 저장을 사용하지 않습니다. /volume1/docker/coupang_coupon/.env를 수정하세요.",
+                    )
+                )
+                return
             login_id = parsed.get("login_id", [""])[0]
             password = parsed.get("login_password", [""])[0]
             ok, output = save_keychain_credentials(login_id, password)
@@ -1180,6 +1251,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "install_schedule":
+            if uses_external_scheduler():
+                ok, output = install_daily_schedule()
+                self.respond(page_html(coupons, products, "NAS 자동 실행은 스케줄러 컨테이너가 담당합니다.", output))
+                return
             if not wing_credentials.has_credentials():
                 self.respond(
                     page_html(
@@ -1197,6 +1272,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if action == "uninstall_schedule":
+            if uses_external_scheduler():
+                ok, output = uninstall_daily_schedule()
+                self.respond(page_html(coupons, products, "NAS 자동 실행은 docker-compose로 관리합니다.", output))
+                return
             ok, output = uninstall_daily_schedule()
             message = "자동 실행을 해제했습니다." if ok else "자동 실행 해제에 실패했습니다."
             self.respond(page_html(coupons, products, message, output), status=200 if ok else 500)

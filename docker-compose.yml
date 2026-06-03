@@ -17,6 +17,8 @@ services:
       COUPON_BIND_HOST: 0.0.0.0
       COUPON_PORT: 8765
       COUPON_OPEN_BROWSER: "false"
+      COUPON_SCHEDULER_MODE: docker
+      COUPON_DAILY_TIME: "00:01"
     ports:
       - "${COUPON_WEB_BIND:-127.0.0.1}:8765:8765"
     volumes:
@@ -38,6 +40,7 @@ services:
       COUPON_DATA_DIR: /data
       COUPON_CONFIG_PATH: /data/browser_coupon_config.json
       COUPON_ARTIFACT_DIR: /data/browser_artifacts
+      COUPON_SCHEDULER_MODE: docker
       COUPON_DAILY_TIME: "00:01"
     volumes:
       - ./data:/data

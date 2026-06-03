@@ -96,6 +96,8 @@ systemctl list-timers coupang-coupon.timer
 - 매일 00:01 실행 컨테이너: `coupang-coupon-scheduler`
 - 영구 데이터 폴더: `data/`
 
+NAS Docker에서는 웹폼의 macOS `launchd` 설치 버튼을 사용하지 않습니다. 자동 실행은 `coupang-coupon-scheduler` 컨테이너가 담당하며, 컨테이너가 `Up` 상태이면 매일 `COUPON_DAILY_TIME` 기준으로 실행을 대기합니다.
+
 DS220+는 Intel x86_64 모델이라 Playwright Chromium Docker 구성이 가능합니다. 기본 메모리 2GB 상태에서도 가벼운 단일 실행은 가능할 수 있지만, DSM과 다른 패키지를 같이 쓰면 여유가 빡빡할 수 있습니다. 가능하면 RAM 업그레이드가 안정적입니다.
 
 Chromium 안정성을 위해 `docker-compose.yml`에는 `shm_size: "1gb"`와 `init: true`를 넣어두었습니다.
@@ -168,6 +170,12 @@ NAS 쪽 Git deploy key 위치도 기존 패턴과 같습니다.
 docker-compose ps
 docker-compose logs --tail=80 coupang-coupon-web
 docker-compose logs --tail=80 coupang-coupon-scheduler
+```
+
+스케줄러 로그에서 아래와 비슷한 문구가 보이면 매일 실행 대기 상태입니다.
+
+```text
+[nas-scheduler] Scheduler started. Daily run time: 00:01 Asia/Seoul
 ```
 
 실제 발급 없이 확인:
