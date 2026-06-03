@@ -9,14 +9,23 @@ PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 
 cd "$APP_DIR"
 
-"$DOCKER" run --rm \
-  -v "$APP_DIR:/repo" \
-  -v "$KEY_DIR:/root/.ssh" \
-  alpine/git \
-  -C /repo \
-  -c safe.directory=/repo \
-  -c core.sshCommand="ssh -i /root/.ssh/github_deploy_key -o StrictHostKeyChecking=no" \
-  pull --ff-only
+if [ -f "$KEY_DIR/github_deploy_key" ]; then
+  "$DOCKER" run --rm \
+    -v "$APP_DIR:/repo" \
+    -v "$KEY_DIR:/root/.ssh" \
+    alpine/git \
+    -C /repo \
+    -c safe.directory=/repo \
+    -c core.sshCommand="ssh -i /root/.ssh/github_deploy_key -o StrictHostKeyChecking=no" \
+    pull --ff-only
+else
+  "$DOCKER" run --rm \
+    -v "$APP_DIR:/repo" \
+    alpine/git \
+    -C /repo \
+    -c safe.directory=/repo \
+    pull --ff-only
+fi
 
 mkdir -p data/logs data/browser_artifacts
 if [ ! -f data/browser_coupon_config.json ]; then
