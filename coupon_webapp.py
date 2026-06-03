@@ -1124,7 +1124,7 @@ def page_html(
 
 
 class Handler(BaseHTTPRequestHandler):
-    def require_auth(self) -> bool:
+    def require_auth(self, *, include_body: bool = True) -> bool:
         if not web_auth_enabled():
             return True
         if valid_basic_auth(self.headers.get("Authorization")):
@@ -1133,10 +1133,19 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="Coupang Coupon"')
         self.send_header("Content-Type", "text/plain; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(body) if include_body else 0))
         self.end_headers()
-        self.wfile.write(body)
+        if include_body:
+            self.wfile.write(body)
         return False
+
+    def do_HEAD(self) -> None:
+        if not self.require_auth(include_body=False):
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def do_GET(self) -> None:
         if not self.require_auth():
