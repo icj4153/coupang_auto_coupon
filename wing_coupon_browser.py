@@ -26,6 +26,10 @@ from wing_credentials import load_credentials
 
 KST = ZoneInfo("Asia/Seoul")
 ARTIFACT_DIR = Path(os.environ.get("COUPON_ARTIFACT_DIR", "browser_artifacts")).expanduser()
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
+)
 
 
 class AutomationError(RuntimeError):
@@ -107,6 +111,20 @@ def looks_like_login(page: Page) -> bool:
     if "xauth.coupang.com" in url or "/login" in url:
         return True
     return False
+
+
+def looks_like_access_denied(page: Page) -> bool:
+    title = ""
+    body_text = ""
+    try:
+        title = page.title().lower()
+    except Exception:
+        pass
+    try:
+        body_text = page.locator("body").inner_text(timeout=1000).lower()
+    except Exception:
+        pass
+    return "access denied" in title or "access denied" in body_text
 
 
 def wing_cookies(context: BrowserContext) -> list[dict[str, Any]]:
@@ -651,6 +669,7 @@ def fill_login_field(page: Page, selectors: list[str], value: str, label: str) -
             fill_control(locator, value)
             log(f"Filled login {label}.")
             return
+    save_artifacts(page, f"login_{label.lower()}_field_not_found")
     raise AutomationError(f"Could not find WING login {label} field.")
 
 
@@ -667,6 +686,13 @@ def attempt_auto_login(page: Page, context: BrowserContext, config: dict[str, An
             return True
 
     log("Login session is missing or expired. Trying credential auto-login.")
+    if looks_like_access_denied(page):
+        save_artifacts(page, "wing_login_access_denied")
+        raise AutomationError(
+            "WING login returned Access Denied before showing the ID/PW form. "
+            "Coupang may be blocking this NAS/headless browser session. "
+            "Check the saved browser artifact in browser_artifacts."
+        )
     fill_login_field(page, ["#username", "input[name='username']", "input[type='text']"], login_id, "ID")
     fill_login_field(page, ["#password", "input[name='password']", "input[type='password']"], password, "password")
     login_button = page.locator("#kc-login, input[name='login'], input[type='submit']").first
@@ -814,6 +840,9 @@ def browser_launch_options(config: dict[str, Any]) -> dict[str, Any]:
         "headless": bool(config.get("headless", False)),
         "slow_mo": int(config.get("slow_mo_ms", 0)),
     }
+    launch_args = config.get("launch_args", ["--disable-blink-features=AutomationControlled"])
+    if isinstance(launch_args, list):
+        options["args"] = [str(arg) for arg in launch_args if str(arg).strip()]
     browser_channel = config.get("browser_channel", "").strip()
     if browser_channel:
         options["channel"] = browser_channel
@@ -822,6 +851,18 @@ def browser_launch_options(config: dict[str, Any]) -> dict[str, Any]:
 
 def new_context_options(config: dict[str, Any], *, use_storage_state: bool) -> dict[str, Any]:
     options: dict[str, Any] = {"viewport": {"width": 1440, "height": 950}}
+    locale = str(config.get("locale", "ko-KR")).strip()
+    if locale:
+        options["locale"] = locale
+        options["extra_http_headers"] = {
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+    timezone_id = str(config.get("timezone_id", "Asia/Seoul")).strip()
+    if timezone_id:
+        options["timezone_id"] = timezone_id
+    user_agent = str(config.get("user_agent", DEFAULT_USER_AGENT)).strip()
+    if user_agent:
+        options["user_agent"] = user_agent
     storage_path = Path(config.get("storage_state_path", "wing_storage_state.json"))
     if use_storage_state and storage_path.exists():
         options["storage_state"] = str(storage_path)
@@ -829,6 +870,19 @@ def new_context_options(config: dict[str, Any], *, use_storage_state: bool) -> d
     elif use_storage_state:
         log(f"No storage state found yet: {storage_path.resolve()}")
     return options
+
+
+def install_context_patches(context: BrowserContext, config: dict[str, Any]) -> None:
+    if not bool(config.get("stealth", True)):
+        return
+    context.add_init_script(
+        """
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['ko-KR', 'ko', 'en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        window.chrome = window.chrome || { runtime: {} };
+        """
+    )
 
 
 def main() -> int:
@@ -868,6 +922,7 @@ def main() -> int:
         if args.fresh_login:
             log("Fresh login mode enabled. Saved browser storage state will be ignored for this run.")
         context = browser.new_context(**new_context_options(config, use_storage_state=not args.fresh_login))
+        install_context_patches(context, config)
         page = context.pages[0] if context.pages else context.new_page()
         page.bring_to_front()
         try:

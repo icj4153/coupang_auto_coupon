@@ -6,6 +6,13 @@
   "browser_channel": "",
   "headless": true,
   "slow_mo_ms": 0,
+  "locale": "ko-KR",
+  "timezone_id": "Asia/Seoul",
+  "user_agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+  "stealth": true,
+  "launch_args": [
+    "--disable-blink-features=AutomationControlled"
+  ],
   "navigation_texts": [
     "프로모션",
     "프로모션 관리",
