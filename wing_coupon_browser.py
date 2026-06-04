@@ -49,6 +49,24 @@ def truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log(f"Ignoring invalid {name}={raw!r}; using {default}.")
+        return default
+    return max(minimum, min(maximum, value))
+
+
+def round_up_to_minute(value: dt.datetime) -> dt.datetime:
+    if value.second or value.microsecond:
+        value += dt.timedelta(minutes=1)
+    return value.replace(second=0, microsecond=0)
+
+
 def parse_vendor_items(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\s,;]+", value) if part.strip()]
 
@@ -78,10 +96,27 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def coupon_window(target_date: dt.date) -> tuple[str, str]:
+def coupon_window(target_date: dt.date, now: dt.datetime | None = None) -> tuple[str, str]:
+    now_kst = now.astimezone(KST) if now else dt.datetime.now(KST)
+    start_at = dt.datetime.combine(target_date, dt.time(0, 0, 0))
+    end_at = dt.datetime.combine(target_date, dt.time(23, 59, 0))
+
+    if target_date == now_kst.date():
+        buffer_minutes = env_int("COUPON_TODAY_START_BUFFER_MINUTES", 5, minimum=1, maximum=120)
+        start_at = round_up_to_minute(now_kst.replace(tzinfo=None) + dt.timedelta(minutes=buffer_minutes))
+        log(
+            "Same-day coupon target detected. "
+            f"Start time adjusted to {start_at:%Y-%m-%dT%H:%M} (now + {buffer_minutes}m)."
+        )
+
+    if start_at > end_at:
+        raise AutomationError(
+            f"Cannot create a coupon for {target_date}: start time {start_at:%H:%M} is after 23:59."
+        )
+
     return (
-        dt.datetime.combine(target_date, dt.time(0, 0, 0)).strftime("%Y-%m-%dT%H:%M"),
-        dt.datetime.combine(target_date, dt.time(23, 59, 0)).strftime("%Y-%m-%dT%H:%M"),
+        start_at.strftime("%Y-%m-%dT%H:%M"),
+        end_at.strftime("%Y-%m-%dT%H:%M"),
     )
 
 

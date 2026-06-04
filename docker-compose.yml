@@ -17,7 +17,8 @@ services:
       COUPON_BIND_HOST: 0.0.0.0
       COUPON_PORT: 8765
       COUPON_SCHEDULER_MODE: docker
-      COUPON_DAILY_TIME: "00:01"
+      COUPON_DAILY_TIME: "${COUPON_DAILY_TIME:-00:01}"
+      COUPON_TODAY_START_BUFFER_MINUTES: "${COUPON_TODAY_START_BUFFER_MINUTES:-5}"
       COUPON_BROWSER_CHANNEL: chrome
     ports:
       - "${COUPON_WEB_BIND:-127.0.0.1}:8765:8765"
@@ -41,7 +42,8 @@ services:
       COUPON_CONFIG_PATH: /data/browser_coupon_config.json
       COUPON_ARTIFACT_DIR: /data/browser_artifacts
       COUPON_SCHEDULER_MODE: docker
-      COUPON_DAILY_TIME: "00:01"
+      COUPON_DAILY_TIME: "${COUPON_DAILY_TIME:-00:01}"
+      COUPON_TODAY_START_BUFFER_MINUTES: "${COUPON_TODAY_START_BUFFER_MINUTES:-5}"
       COUPON_BROWSER_CHANNEL: chrome
     volumes:
       - ./data:/data

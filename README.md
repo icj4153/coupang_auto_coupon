@@ -37,6 +37,8 @@ COUPANG_WING_PASSWORD=쿠팡WING비밀번호
 COUPON_WEB_USER=admin
 COUPON_WEB_PASSWORD=긴_랜덤_비밀번호
 COUPON_WEB_BIND=127.0.0.1
+COUPON_DAILY_TIME=00:01
+COUPON_TODAY_START_BUFFER_MINUTES=5
 ```
 
 `COUPON_WEB_BIND=127.0.0.1`은 NAS 내부와 역방향 프록시에서만 웹폼에 접근하게 하는 설정입니다. 외부 공개 시에는 반드시 `COUPON_WEB_PASSWORD`를 길고 예측 불가능하게 설정하세요.
@@ -74,6 +76,8 @@ https://icj7297.synology.me:8766
 6. 문제가 없으면 `선택 쿠폰 만들기 실행`으로 실제 발급합니다.
 
 스케줄러 컨테이너가 켜져 있으면 매일 `00:01`에 저장된 전체 쿠폰을 그날 날짜 기준으로 발급합니다. 시간은 `.env` 또는 `docker-compose.yml`의 `COUPON_DAILY_TIME`으로 바꿀 수 있습니다.
+
+당일 쿠폰은 쿠팡에서 이미 지난 시작 시간을 거부할 수 있으므로, 유효기간 시작 시각을 자동 실행 시각보다 조금 뒤로 입력합니다. 기본값은 `COUPON_TODAY_START_BUFFER_MINUTES=5`라서 00:01 실행 시 보통 00:06 전후로 시작하고, 종료는 당일 23:59입니다.
 
 ## 상태 확인
 
