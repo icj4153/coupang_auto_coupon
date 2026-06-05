@@ -67,6 +67,10 @@ def round_up_to_minute(value: dt.datetime) -> dt.datetime:
     return value.replace(second=0, microsecond=0)
 
 
+def parse_input_datetime(value: str) -> dt.datetime:
+    return dt.datetime.strptime(value.replace("T", " "), "%Y-%m-%d %H:%M")
+
+
 def parse_vendor_items(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\s,;]+", value) if part.strip()]
 
@@ -118,6 +122,45 @@ def coupon_window(target_date: dt.date, now: dt.datetime | None = None) -> tuple
         start_at.strftime("%Y-%m-%dT%H:%M"),
         end_at.strftime("%Y-%m-%dT%H:%M"),
     )
+
+
+def form_issue_datetime(page: Page) -> dt.datetime | None:
+    try:
+        text = form_item(page, "쿠폰 발행일시").inner_text(timeout=1000)
+    except Exception:
+        return None
+    match = re.search(r"(20\d{2}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})", text)
+    if not match:
+        return None
+    try:
+        return dt.datetime.strptime(f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+def adjust_start_for_form_issue_time(page: Page, start_at: str, end_at: str) -> str:
+    issue_at = form_issue_datetime(page)
+    if issue_at is None:
+        return start_at
+
+    start_dt = parse_input_datetime(start_at)
+    end_dt = parse_input_datetime(end_at)
+    buffer_minutes = env_int("COUPON_TODAY_START_BUFFER_MINUTES", 5, minimum=1, maximum=120)
+    minimum_start = round_up_to_minute(issue_at + dt.timedelta(minutes=buffer_minutes))
+    if minimum_start.date() != start_dt.date() or start_dt >= minimum_start:
+        return start_at
+    if minimum_start > end_dt:
+        raise AutomationError(
+            "Coupon start time cannot be moved after the WING issue time. "
+            f"Issue time: {issue_at:%Y-%m-%d %H:%M}, required start: {minimum_start:%Y-%m-%dT%H:%M}, "
+            f"end: {end_dt:%Y-%m-%dT%H:%M}."
+        )
+    log(
+        "Adjusted coupon start from "
+        f"{start_dt:%Y-%m-%dT%H:%M} to {minimum_start:%Y-%m-%dT%H:%M} "
+        f"based on WING issue time {issue_at:%Y-%m-%d %H:%M}."
+    )
+    return minimum_start.strftime("%Y-%m-%dT%H:%M")
 
 
 def campaign_name(base: str, target_date: dt.date, *, append_date_suffix: bool = False) -> str:
@@ -237,6 +280,17 @@ def safe_click(locator: Locator, page: Page, text: str) -> bool:
     except Exception as exc:
         log(f"Click failed for '{text}': {exc}")
         return False
+
+
+def click_or_js(locator: Locator, label: str, *, timeout: int = 4000) -> None:
+    target = locator.first
+    target.wait_for(state="visible", timeout=timeout)
+    target.scroll_into_view_if_needed(timeout=timeout)
+    try:
+        target.click(timeout=timeout)
+    except TimeoutError:
+        log(f"Normal click timed out for '{label}', dispatching DOM click.")
+        target.evaluate("(el) => el.click()")
 
 
 def fill_control(locator: Locator, value: str) -> None:
@@ -432,14 +486,42 @@ def click_final_create_coupon(page: Page) -> None:
     if not visible(button, timeout=3000):
         save_artifacts(page, "final_create_button_not_found")
         raise AutomationError("Could not find the final '할인쿠폰 만들기' button in the coupon form.")
-    button.scroll_into_view_if_needed(timeout=3000)
-    if not safe_click(button, page, "final 할인쿠폰 만들기"):
-        raise AutomationError("Could not click the final '할인쿠폰 만들기' button.")
-    page.wait_for_timeout(1500)
-    success = page.get_by_text(re.compile("쿠폰이 성공적으로 생성|성공적으로 생성", re.I)).last
-    if visible(success, timeout=3500):
-        log("WING reported coupon creation success.")
-    click_first_text(page, ["확인", "예", "OK", "Confirm"], timeout=1200)
+    click_or_js(button, "final 할인쿠폰 만들기", timeout=5000)
+
+    confirm = page.locator("[role='dialog'].n-modal, .n-card.n-modal").last.get_by_role(
+        "button",
+        name=re.compile(r"^(확인|예|OK|Confirm)$", re.I),
+    )
+    if visible(confirm, timeout=3000):
+        click_or_js(confirm, "final confirmation", timeout=5000)
+
+    success = page.get_by_text(re.compile("쿠폰.*(성공|완료)|성공적으로 생성|생성이 완료", re.I)).last
+    deadline = time.monotonic() + 12
+    while time.monotonic() < deadline:
+        if visible(success, timeout=250):
+            log("WING reported coupon creation success.")
+            return
+        if not visible(button, timeout=250):
+            log("Final coupon form closed after submit.")
+            return
+        page.wait_for_timeout(300)
+
+    error_text = ""
+    try:
+        error_text = scope.locator(
+            ".n-form-item-feedback, .n-message, .n-alert, .n-notification, .n-modal"
+        ).last.inner_text(timeout=1000)
+    except Exception:
+        pass
+    if not error_text:
+        try:
+            error_text = scope.inner_text(timeout=1000)[-1000:]
+        except Exception:
+            error_text = "No visible WING error text was captured."
+    raise AutomationError(
+        "Final coupon submit did not complete; the creation form stayed open. "
+        f"Last visible text: {error_text}"
+    )
 
 
 def unique_texts(texts: list[str]) -> list[str]:
@@ -536,6 +618,7 @@ def fill_wing_coupon_modal(
     end_at: str,
 ) -> None:
     set_coupon_type_in_modal(page, row["coupon_kind"])
+    start_at = adjust_start_for_form_issue_time(page, start_at, end_at)
     if row["coupon_kind"] == "downloadable":
         coupon_form_scope(page).get_by_placeholder(re.compile("행사명", re.I)).first.wait_for(state="visible", timeout=5000)
         fill_form_input(page, "할인쿠폰명", display_name, 1)

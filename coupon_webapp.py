@@ -757,7 +757,7 @@ def page_html(
     <div class="topbar">
       <div>
         <h1>쿠팡 쿠폰 자동화</h1>
-        <p class="sub">수동 실행은 내일({target_date:%Y-%m-%d}) 쿠폰을 미리 만들고, NAS 자동 실행은 매일 {scheduler_time()}에 당일({today:%Y-%m-%d}) 쿠폰을 생성합니다. 당일 쿠폰 시작 시간은 실행 시각보다 약 {start_buffer}분 뒤로 입력합니다.</p>
+        <p class="sub">수동 실행은 내일({target_date:%Y-%m-%d}) 쿠폰을 미리 만들고, NAS 자동 실행은 매일 {scheduler_time()}에 당일({today:%Y-%m-%d}) 쿠폰을 생성합니다. 당일 쿠폰 시작 시간은 쿠팡 발행일시보다 약 {start_buffer}분 뒤로 입력합니다.</p>
       </div>
       <div class="top-actions">
         {login_actions_html}
