@@ -398,11 +398,7 @@ def run_automation(coupons: list[dict[str, str]], submit: bool) -> tuple[int, st
 
 
 def scheduler_time() -> str:
-    return os.environ.get("COUPON_DAILY_TIME", "00:01").strip() or "00:01"
-
-
-def today_start_buffer_minutes() -> str:
-    return os.environ.get("COUPON_TODAY_START_BUFFER_MINUTES", "5").strip() or "5"
+    return os.environ.get("COUPON_DAILY_TIME", "22:30").strip() or "22:30"
 
 
 def esc(value: object) -> str:
@@ -657,8 +653,7 @@ def page_html(
         "environment": "환경변수",
     }.get(credential_source, "미설정")
     schedule_status = "컨테이너"
-    start_buffer = today_start_buffer_minutes()
-    schedule_loaded = f"{scheduler_time()} 당일"
+    schedule_loaded = f"{scheduler_time()} 내일"
     schedule_label = "스케줄러"
     schedule_actions_html = "<span class='status-pill'>NAS 자동 실행 사용 중</span>"
     if credential_source == "environment":
@@ -758,7 +753,7 @@ def page_html(
     <div class="topbar">
       <div>
         <h1>쿠팡 쿠폰 자동화</h1>
-        <p class="sub">수동 실행은 내일({target_date:%Y-%m-%d}) 쿠폰을 미리 만들고, NAS 자동 실행은 매일 {scheduler_time()}에 당일({today:%Y-%m-%d}) 쿠폰을 생성합니다. 당일 쿠폰 시작 시간은 쿠팡 발행일시보다 약 {start_buffer}분 뒤로 입력합니다.</p>
+        <p class="sub">수동 실행과 NAS 자동 실행 모두 내일({target_date:%Y-%m-%d}) 쿠폰을 미리 생성합니다. 자동 실행은 매일 {scheduler_time()}에 다음날 00:00~23:59 쿠폰을 만듭니다.</p>
       </div>
       <div class="top-actions">
         {login_actions_html}
@@ -773,9 +768,7 @@ def page_html(
       <div class="stat"><strong>{coupon_count}</strong><span>등록된 쿠폰</span></div>
       <div class="stat"><strong>{option_total}</strong><span>전체 옵션 ID</span></div>
       <div class="stat"><strong>{coupon_count}</strong><span>전체 선택 시 생성 수</span></div>
-      <div class="stat"><strong>{target_date:%m/%d}</strong><span>수동 생성일</span></div>
-      <div class="stat"><strong>{today:%m/%d}</strong><span>자동 생성일</span></div>
-      <div class="stat"><strong>+{start_buffer}분</strong><span>당일 시작 보정</span></div>
+      <div class="stat"><strong>{target_date:%m/%d}</strong><span>생성 대상일</span></div>
       <div class="stat"><strong>{credential_status}</strong><span>로그인 정보</span></div>
       <div class="stat"><strong>{schedule_status}</strong><span>자동 실행</span></div>
       <div class="stat"><strong>{schedule_loaded}</strong><span>{schedule_label}</span></div>

@@ -25,7 +25,7 @@ def log(message: str) -> None:
 
 
 def parse_run_time() -> tuple[int, int]:
-    value = os.environ.get("COUPON_DAILY_TIME", "00:01").strip()
+    value = os.environ.get("COUPON_DAILY_TIME", "22:30").strip()
     try:
         hour_text, minute_text = value.split(":", 1)
         hour = int(hour_text)
@@ -77,18 +77,22 @@ def main() -> int:
     hour, minute = parse_run_time()
     state = load_state()
     log(f"Scheduler started. Daily run time: {hour:02d}:{minute:02d} Asia/Seoul")
+    log("Each run creates coupons for the next KST date.")
 
     while True:
         now = dt.datetime.now(KST)
         today = now.date()
+        target_date = today + dt.timedelta(days=1)
         target_at = dt.datetime.combine(today, dt.time(hour, minute), tzinfo=KST)
         today_key = today.isoformat()
+        target_key = target_date.isoformat()
 
-        if now >= target_at and state.get("last_attempt_date") != today_key:
+        if now >= target_at and state.get("last_target_date") != target_key:
             state["last_attempt_date"] = today_key
+            state["last_target_date"] = target_key
             state["last_attempt_at"] = now.isoformat(timespec="seconds")
             save_state(state)
-            exit_code = run_daily(today)
+            exit_code = run_daily(target_date)
             state["last_exit_code"] = str(exit_code)
             state["last_finished_at"] = dt.datetime.now(KST).isoformat(timespec="seconds")
             save_state(state)

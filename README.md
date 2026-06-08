@@ -37,7 +37,7 @@ COUPANG_WING_PASSWORD=쿠팡WING비밀번호
 COUPON_WEB_USER=admin
 COUPON_WEB_PASSWORD=긴_랜덤_비밀번호
 COUPON_WEB_BIND=127.0.0.1
-COUPON_DAILY_TIME=00:01
+COUPON_DAILY_TIME=22:30
 COUPON_TODAY_START_BUFFER_MINUTES=5
 ```
 
@@ -75,9 +75,9 @@ https://icj7297.synology.me:8766
 5. `선택 입력 테스트`로 WING 입력과 상품 조회까지 확인합니다.
 6. 문제가 없으면 `선택 쿠폰 만들기 실행`으로 실제 발급합니다.
 
-스케줄러 컨테이너가 켜져 있으면 매일 `00:01`에 저장된 전체 쿠폰을 그날 날짜 기준으로 발급합니다. 시간은 `.env` 또는 `docker-compose.yml`의 `COUPON_DAILY_TIME`으로 바꿀 수 있습니다.
+스케줄러 컨테이너가 켜져 있으면 매일 `22:30`에 저장된 전체 쿠폰을 다음날 날짜 기준으로 미리 발급합니다. 시간은 `.env` 또는 `docker-compose.yml`의 `COUPON_DAILY_TIME`으로 바꿀 수 있습니다.
 
-당일 쿠폰은 쿠팡에서 이미 지난 시작 시간을 거부할 수 있으므로, 유효기간 시작 시각을 쿠팡 폼에 표시되는 발행일시보다 조금 뒤로 입력합니다. 기본값은 `COUPON_TODAY_START_BUFFER_MINUTES=5`라서 쿠팡 발행일시 기준 5분 뒤에 시작하고, 종료는 당일 23:59입니다.
+자동 실행으로 생성되는 쿠폰 유효기간은 다음날 `00:00`부터 `23:59`까지입니다. `COUPON_TODAY_START_BUFFER_MINUTES`는 CLI로 당일 쿠폰을 직접 만들 때만 사용하는 안전 보정값입니다.
 
 여러 쿠폰 중 하나가 실패해도 뒤 쿠폰은 계속 시도합니다. 다만 실패 항목이 하나라도 있으면 실행 결과는 실패(exit=1)로 남고, `browser_artifacts/`에 해당 쿠폰의 스크린샷과 HTML이 저장됩니다.
 
@@ -93,7 +93,8 @@ cd /volume1/docker/coupang_coupon
 스케줄러가 정상 대기 중이면 아래처럼 보입니다.
 
 ```text
-[nas-scheduler] Scheduler started. Daily run time: 00:01 Asia/Seoul
+[nas-scheduler] Scheduler started. Daily run time: 22:30 Asia/Seoul
+[nas-scheduler] Each run creates coupons for the next KST date.
 ```
 
 실제 발급 없이 계획만 확인:

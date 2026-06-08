@@ -68,10 +68,6 @@ def round_up_to_minute(value: dt.datetime) -> dt.datetime:
     return value.replace(second=0, microsecond=0)
 
 
-def parse_input_datetime(value: str) -> dt.datetime:
-    return dt.datetime.strptime(value.replace("T", " "), "%Y-%m-%d %H:%M")
-
-
 def parse_vendor_items(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\s,;]+", value) if part.strip()]
 
@@ -123,45 +119,6 @@ def coupon_window(target_date: dt.date, now: dt.datetime | None = None) -> tuple
         start_at.strftime("%Y-%m-%dT%H:%M"),
         end_at.strftime("%Y-%m-%dT%H:%M"),
     )
-
-
-def form_issue_datetime(page: Page) -> dt.datetime | None:
-    try:
-        text = form_item(page, "쿠폰 발행일시").inner_text(timeout=1000)
-    except Exception:
-        return None
-    match = re.search(r"(20\d{2}-\d{2}-\d{2})\s+(\d{1,2}:\d{2})", text)
-    if not match:
-        return None
-    try:
-        return dt.datetime.strptime(f"{match.group(1)} {match.group(2)}", "%Y-%m-%d %H:%M")
-    except ValueError:
-        return None
-
-
-def adjust_start_for_form_issue_time(page: Page, start_at: str, end_at: str) -> str:
-    issue_at = form_issue_datetime(page)
-    if issue_at is None:
-        return start_at
-
-    start_dt = parse_input_datetime(start_at)
-    end_dt = parse_input_datetime(end_at)
-    buffer_minutes = env_int("COUPON_TODAY_START_BUFFER_MINUTES", 5, minimum=1, maximum=120)
-    minimum_start = round_up_to_minute(issue_at + dt.timedelta(minutes=buffer_minutes))
-    if minimum_start.date() != start_dt.date() or start_dt >= minimum_start:
-        return start_at
-    if minimum_start > end_dt:
-        raise AutomationError(
-            "Coupon start time cannot be moved after the WING issue time. "
-            f"Issue time: {issue_at:%Y-%m-%d %H:%M}, required start: {minimum_start:%Y-%m-%dT%H:%M}, "
-            f"end: {end_dt:%Y-%m-%dT%H:%M}."
-        )
-    log(
-        "Adjusted coupon start from "
-        f"{start_dt:%Y-%m-%dT%H:%M} to {minimum_start:%Y-%m-%dT%H:%M} "
-        f"based on WING issue time {issue_at:%Y-%m-%d %H:%M}."
-    )
-    return minimum_start.strftime("%Y-%m-%dT%H:%M")
 
 
 def campaign_name(base: str, target_date: dt.date, *, append_date_suffix: bool = False) -> str:
@@ -671,7 +628,6 @@ def fill_wing_coupon_modal(
     end_at: str,
 ) -> None:
     set_coupon_type_in_modal(page, row["coupon_kind"])
-    start_at = adjust_start_for_form_issue_time(page, start_at, end_at)
     if row["coupon_kind"] == "downloadable":
         coupon_form_scope(page).get_by_placeholder(re.compile("행사명", re.I)).first.wait_for(state="visible", timeout=5000)
         fill_form_input(page, "할인쿠폰명", display_name, 1)
