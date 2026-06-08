@@ -382,6 +382,7 @@ def run_automation(coupons: list[dict[str, str]], submit: bool) -> tuple[int, st
         "--days",
         "1",
         "--auto-login",
+        "--continue-on-error",
     ]
     if submit:
         cmd.append("--submit")

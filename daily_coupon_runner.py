@@ -76,6 +76,7 @@ def main() -> int:
             "--submit",
             "--auto-login",
             "--fresh-login",
+            "--continue-on-error",
         ]
 
         header = (

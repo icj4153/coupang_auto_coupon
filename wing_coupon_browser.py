@@ -30,6 +30,7 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 )
+COUPON_MODAL_SELECTOR = "[role='dialog'].n-modal, .n-card.n-modal, .n-modal-container"
 
 
 class AutomationError(RuntimeError):
@@ -222,40 +223,56 @@ def visible(locator: Locator, timeout: int = 1200) -> bool:
 
 
 def modal_is_open(page: Page) -> bool:
-    return visible(page.locator("[role='dialog'].n-modal, .n-card.n-modal").last, timeout=100)
+    return visible(page.locator(COUPON_MODAL_SELECTOR).last, timeout=100)
 
 
 def wait_for_modal(page: Page, timeout: int = 5000) -> bool:
-    return visible(page.locator("[role='dialog'].n-modal, .n-card.n-modal").last, timeout=timeout)
+    return visible(page.locator(COUPON_MODAL_SELECTOR).last, timeout=timeout)
 
 
 def modal(page: Page) -> Locator:
-    return page.locator("[role='dialog'].n-modal, .n-card.n-modal").last
+    return page.locator(COUPON_MODAL_SELECTOR).last
 
 
 def coupon_form_scope(page: Page) -> Locator:
-    if modal_is_open(page):
-        return modal(page)
-    container = page.locator(".coupon-apply-container").first
-    if container.count() > 0:
+    modal_form = page.locator(COUPON_MODAL_SELECTOR).filter(has_text="쿠폰종류").last
+    if visible(modal_form, timeout=250):
+        return modal_form
+    container = page.locator(".coupon-apply-container").filter(has_text="쿠폰종류").last
+    if visible(container, timeout=250):
         return container
+    any_form = page.locator("body").filter(has_text="쿠폰종류").last
+    if visible(any_form, timeout=250):
+        return any_form
     return page.locator("body")
 
 
 def coupon_form_is_present(page: Page) -> bool:
     try:
-        page.locator("input[type='radio'][name='couponType']").first.wait_for(state="attached", timeout=1500)
+        coupon_form_scope(page).locator("input[type='radio'][name='couponType']").first.wait_for(
+            state="attached",
+            timeout=1500,
+        )
         return True
     except TimeoutError:
         return visible(page.get_by_text("쿠폰종류", exact=True), timeout=800)
 
 
 def wait_for_coupon_form(page: Page, timeout: int = 5000) -> bool:
-    try:
-        page.locator("input[type='radio'][name='couponType']").first.wait_for(state="attached", timeout=timeout)
-        return True
-    except TimeoutError:
-        return visible(page.get_by_text("쿠폰종류", exact=True), timeout=300)
+    deadline = time.monotonic() + (timeout / 1000)
+    while time.monotonic() < deadline:
+        scope = coupon_form_scope(page)
+        try:
+            scope.locator("input[type='radio'][name='couponType']").first.wait_for(
+                state="attached",
+                timeout=300,
+            )
+            return True
+        except TimeoutError:
+            if visible(scope.get_by_text("쿠폰종류", exact=True), timeout=150):
+                return True
+        page.wait_for_timeout(150)
+    return False
 
 
 def safe_click(locator: Locator, page: Page, text: str) -> bool:
@@ -443,28 +460,64 @@ def click_form_label(page: Page, label: str) -> bool:
 
 def set_form_radio(page: Page, name: str, value: str, label: str) -> None:
     scope = coupon_form_scope(page)
-    label_locator = scope.locator(
-        f"xpath=.//label[.//*[normalize-space()='{label}']]"
-    ).first
-    if visible(label_locator, timeout=2000):
-        label_locator.scroll_into_view_if_needed(timeout=3000)
-        label_locator.click(force=True, timeout=3000)
-        page.wait_for_timeout(800)
+    result = scope.evaluate(
+        """(root, args) => {
+            const doc = root.ownerDocument;
+            const visible = (el) => Boolean(el && (el.offsetParent || el.getClientRects().length));
+            const roots = [
+                root,
+                ...Array.from(doc.querySelectorAll('.n-modal-container, [role="dialog"].n-modal, .n-card.n-modal')).reverse(),
+                ...Array.from(doc.querySelectorAll('.coupon-apply-container')).reverse(),
+                doc.body,
+            ].filter(Boolean);
 
-    input_locator = scope.locator(f"input[type='radio'][name='{name}'][value='{value}']").first
-    input_locator.wait_for(state="attached", timeout=3000)
-    if not input_locator.is_checked():
+            for (const candidateRoot of roots) {
+                const rootText = candidateRoot.innerText || '';
+                if (!rootText.includes('쿠폰종류') && !candidateRoot.querySelector(`input[type="radio"][name="${args.name}"]`)) {
+                    continue;
+                }
+                const inputs = Array.from(candidateRoot.querySelectorAll('input[type="radio"]'))
+                    .filter((input) => input.name === args.name);
+                let input = inputs.find((item) => item.value === args.value);
+                let label = input ? input.closest('label') : null;
+                if (!label) {
+                    label = Array.from(candidateRoot.querySelectorAll('label'))
+                        .find((item) => (item.innerText || '').replace(/\\s+/g, '').includes(args.label.replace(/\\s+/g, '')));
+                    input = label ? label.querySelector(`input[type="radio"][name="${args.name}"]`) : input;
+                }
+                if (!input && !label) continue;
+                const clickTarget = label || input;
+                clickTarget.scrollIntoView({ block: 'center', inline: 'center' });
+                clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                if (input) {
+                    input.checked = true;
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                return {
+                    ok: Boolean(input || label),
+                    checked: input ? input.checked : false,
+                    value: input ? input.value : '',
+                    text: clickTarget.innerText || '',
+                    visible: visible(clickTarget),
+                };
+            }
+            return { ok: false, checked: false, value: '', text: '', visible: false };
+        }""",
+        {"name": name, "value": value, "label": label},
+    )
+    page.wait_for_timeout(700)
+    if not result.get("ok"):
+        save_artifacts(page, f"radio_not_found_{name}_{value}")
+        raise AutomationError(f"Could not find radio: {label}")
+    input_locator = coupon_form_scope(page).locator(f"input[type='radio'][name='{name}'][value='{value}']").first
+    if visible(input_locator, timeout=1200) and not input_locator.is_checked():
         input_locator.check(force=True, timeout=3000)
-        input_locator.evaluate(
-            """(el) => {
-                el.checked = true;
-                el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-                el.dispatchEvent(new Event('input', { bubbles: true }));
-                el.dispatchEvent(new Event('change', { bubbles: true }));
-            }"""
-        )
-    page.wait_for_timeout(800)
-    if not input_locator.is_checked():
+        page.wait_for_timeout(500)
+    if visible(input_locator, timeout=800) and not input_locator.is_checked():
+        save_artifacts(page, f"radio_not_selected_{name}_{value}")
         raise AutomationError(f"Could not select radio: {label}")
     log(f"Selected form radio: {label}")
 
@@ -488,7 +541,7 @@ def click_final_create_coupon(page: Page) -> None:
         raise AutomationError("Could not find the final '할인쿠폰 만들기' button in the coupon form.")
     click_or_js(button, "final 할인쿠폰 만들기", timeout=5000)
 
-    confirm = page.locator("[role='dialog'].n-modal, .n-card.n-modal").last.get_by_role(
+    confirm = page.locator(COUPON_MODAL_SELECTOR).last.get_by_role(
         "button",
         name=re.compile(r"^(확인|예|OK|Confirm)$", re.I),
     )
@@ -564,7 +617,7 @@ def click_create_coupon_button(page: Page, config: dict[str, Any], *, timeout: i
 def close_intro_popup(page: Page, config: dict[str, Any], *, timeout: int = 2500) -> None:
     start = time.monotonic()
     deadline = start + (timeout / 1000)
-    popup = page.locator("[role='dialog'].n-modal, .n-card.n-modal").filter(
+    popup = page.locator(COUPON_MODAL_SELECTOR).filter(
         has_text="쿠폰으로 매출 성장"
     ).last
     while time.monotonic() < deadline:
@@ -950,6 +1003,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Allow submitting more than one future day. Disabled by default because WING may silently drop product links.",
     )
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue with later coupons when one coupon fails, then exit non-zero if any failed.",
+    )
     return parser.parse_args()
 
 
@@ -1064,6 +1122,7 @@ def main() -> int:
                     navigate_to_coupon_page(page, config)
                     ensure_logged_in(page, context, config, auto_login=args.auto_login)
             results = []
+            failures = []
             jobs = [(row, target_date) for row in rows for target_date in target_dates]
             for job_index, (row, target_date) in enumerate(jobs):
                 if job_index > 0 and not args.manual_coupon_page:
@@ -1081,11 +1140,24 @@ def main() -> int:
                             append_date_suffix=append_date_suffix,
                         )
                     )
-                except Exception:
+                except Exception as exc:
                     save_artifacts(page, f"failed_line_{row['line']}_{target_date:%Y%m%d}")
-                    raise
+                    failure = {
+                        "line": row["line"],
+                        "campaign_name": row.get("campaign_name", ""),
+                        "target_date": str(target_date),
+                        "submit": args.submit,
+                        "vendor_item_count": len(row.get("vendor_item_ids", [])),
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    failures.append(failure)
+                    results.append(failure)
+                    log(f"Coupon failed but continuing: {failure['error']}")
+                    if not args.continue_on_error:
+                        raise
             print(json.dumps(results, ensure_ascii=False, indent=2))
-            return 0
+            return 1 if failures else 0
         finally:
             context.close()
             if browser:
