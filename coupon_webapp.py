@@ -29,6 +29,8 @@ PRODUCTS_PATH = DATA_DIR / "coupon_products.json"
 GENERATED_CSV_PATH = DATA_DIR / "browser_coupons.generated.csv"
 LOG_DIR = Path(os.environ.get("COUPON_LOG_DIR", DATA_DIR / "logs")).expanduser()
 KST = ZoneInfo("Asia/Seoul")
+RESULTS_BEGIN = "__WING_COUPON_RESULTS_BEGIN__"
+RESULTS_END = "__WING_COUPON_RESULTS_END__"
 
 DEFAULT_COUPON = {
     "campaign_name": "오늘만 특가",
@@ -363,13 +365,61 @@ def coupon_summary(coupon: dict[str, str]) -> str:
     return f"{kind} / {discount_type} / {detail}"
 
 
+def parse_automation_results(output: str) -> list[dict[str, object]]:
+    start = output.rfind(RESULTS_BEGIN)
+    if start < 0:
+        return []
+    start += len(RESULTS_BEGIN)
+    end = output.find(RESULTS_END, start)
+    if end < 0:
+        return []
+    try:
+        parsed = json.loads(output[start:end].strip())
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def automation_error_summary(output: str) -> str:
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    for line in reversed(lines):
+        if line.startswith("ERROR:"):
+            return line.removeprefix("ERROR:").strip()
+    return lines[-1] if lines else "자동화가 결과를 반환하지 않았습니다."
+
+
+def fallback_automation_results(
+    coupons: list[dict[str, str]],
+    *,
+    submit: bool,
+    returncode: int,
+    output: str,
+) -> list[dict[str, object]]:
+    error = (
+        automation_error_summary(output)
+        if returncode
+        else "자동화는 종료됐지만 쿠폰별 결과를 확인하지 못했습니다. 로그를 확인하세요."
+    )
+    return [
+        {
+            "campaign_name": coupon["campaign_name"],
+            "submit": submit,
+            "status": "failed",
+            "error": error,
+        }
+        for coupon in coupons
+    ]
+
+
 def run_automation(
     coupons: list[dict[str, str]],
     submit: bool,
     *,
     target_date: dt.date | None = None,
     start_time: str | None = None,
-) -> tuple[int, str]:
+) -> tuple[int, str, list[dict[str, object]]]:
     LOG_DIR.mkdir(exist_ok=True)
     write_csv(coupons)
     target_date = target_date or (dt.datetime.now(KST).date() + dt.timedelta(days=1))
@@ -402,7 +452,15 @@ def run_automation(
         stderr=subprocess.STDOUT,
     )
     log_path.write_text(completed.stdout, encoding="utf-8")
-    return completed.returncode, completed.stdout
+    results = parse_automation_results(completed.stdout)
+    if not results:
+        results = fallback_automation_results(
+            coupons,
+            submit=submit,
+            returncode=completed.returncode,
+            output=completed.stdout,
+        )
+    return completed.returncode, completed.stdout, results
 
 
 def validate_same_day_start_time(value: str) -> tuple[str, str]:
@@ -650,6 +708,49 @@ def product_modal_html(product: dict[str, str], show_modal: bool) -> str:
     """
 
 
+def execution_results_html(results: list[dict[str, object]], submit: bool) -> str:
+    if not results:
+        return ""
+    failed_count = sum(1 for result in results if result.get("status") == "failed")
+    success_count = len(results) - failed_count
+    title = "쿠폰 만들기 결과" if submit else "입력 테스트 결과"
+    summary_class = "result-summary failed" if failed_count else "result-summary success"
+    summary = f"성공 {success_count}개 · 실패 {failed_count}개"
+    rows = []
+    for result in results:
+        failed = result.get("status") == "failed"
+        status_label = "실패" if failed else ("발급 성공" if submit else "입력 완료")
+        status_class = "result-status failed" if failed else "result-status success"
+        target_date = str(result.get("target_date") or "-")
+        start_at = str(result.get("start_at") or "")
+        schedule = start_at.replace("T", " ") if start_at else target_date
+        detail = str(result.get("error") or ("쿠폰이 정상적으로 발급되었습니다." if submit else "쿠폰 입력과 상품 조회를 완료했습니다."))
+        rows.append(
+            f"""
+            <tr>
+              <td data-label="쿠폰명"><strong>{esc(result.get('campaign_name') or '-')}</strong></td>
+              <td class="date" data-label="대상 일시">{esc(schedule)}</td>
+              <td data-label="결과"><span class="{status_class}">{status_label}</span></td>
+              <td class="result-detail" data-label="상세">{esc(detail)}</td>
+            </tr>
+            """
+        )
+    return f"""
+    <section class="execution-results" aria-live="polite">
+      <div class="result-head">
+        <strong>{title}</strong>
+        <span class="{summary_class}">{summary}</span>
+      </div>
+      <div class="result-table-wrap">
+        <table>
+          <thead><tr><th>쿠폰명</th><th>대상 일시</th><th>결과</th><th>상세</th></tr></thead>
+          <tbody>{''.join(rows)}</tbody>
+        </table>
+      </div>
+    </section>
+    """
+
+
 def page_html(
     coupons: list[dict[str, str]],
     products: list[dict[str, str]],
@@ -661,10 +762,16 @@ def page_html(
     modal_product: dict[str, str] | None = None,
     show_product_modal: bool = False,
     same_day_start_time: str = "",
+    execution_results: list[dict[str, object]] | None = None,
+    execution_submit: bool = False,
 ) -> bytes:
     today = dt.datetime.now(KST).date()
     target_date = today + dt.timedelta(days=1)
-    message_html = f"<div class='notice'>{esc(message)}</div>" if message else ""
+    execution_results = execution_results or []
+    has_failures = any(result.get("status") == "failed" for result in execution_results)
+    notice_class = "notice danger" if has_failures else ("notice success" if execution_results else "notice")
+    message_html = f"<div class='{notice_class}'>{esc(message)}</div>" if message else ""
+    results_html = execution_results_html(execution_results, execution_submit)
     output_html = f"<pre>{esc(output[-10000:])}</pre>" if output else ""
     coupon_count = len(coupons)
     product_count = len(products)
@@ -690,6 +797,7 @@ def page_html(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
   <title>쿠팡 쿠폰 자동화</title>
   <style>
     :root {{
@@ -754,7 +862,26 @@ def page_html(
     .save {{ background: #e7ebf0; color: #1d2733; }}
     .delete {{ background: #fff0ee; color: #bf2a17; padding: 9px 11px; }}
     .notice {{ margin: 0 0 16px; padding: 12px 14px; background: #fff8d8; border: 1px solid #ead47a; border-radius: 8px; }}
+    .notice.success {{ background: #eaf8f1; border-color: #9fd8bd; color: #176348; }}
     .notice.danger {{ background: #fff0ee; border-color: #f0b2a8; color: #8f2014; }}
+    .execution-results {{ margin: 0 0 18px; background: #fff; border: 1px solid #d9dee5; border-radius: 8px; overflow: hidden; }}
+    .result-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid #e5e9ef; }}
+    .result-summary, .result-status {{ display: inline-flex; align-items: center; border-radius: 999px; font-size: 13px; font-weight: 800; white-space: nowrap; }}
+    .result-summary {{ padding: 8px 11px; }}
+    .result-status {{ padding: 5px 8px; }}
+    .result-summary.success, .result-status.success {{ background: #eaf8f1; color: #176348; }}
+    .result-summary.failed, .result-status.failed {{ background: #fff0ee; color: #a02b1a; }}
+    .result-detail {{ min-width: 240px; color: #405064; line-height: 1.45; }}
+    .result-table-wrap {{ overflow-x: auto; }}
+    @media (max-width: 640px) {{
+      .execution-results table, .execution-results tbody, .execution-results tr, .execution-results td {{ display: block; width: 100%; box-sizing: border-box; }}
+      .execution-results thead {{ display: none; }}
+      .execution-results tr {{ padding: 12px 16px; border-bottom: 1px solid #eef1f5; }}
+      .execution-results tr:last-child {{ border-bottom: 0; }}
+      .execution-results td {{ display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 6px 0; border: 0; white-space: normal; }}
+      .execution-results td::before {{ content: attr(data-label); color: #667487; font-size: 12px; font-weight: 800; }}
+      .execution-results .result-detail {{ min-width: 0; overflow-wrap: anywhere; }}
+    }}
     pre {{ margin-top: 20px; background: #111827; color: #d1e7ff; padding: 16px; border-radius: 8px; overflow: auto; max-height: 420px; }}
     dialog {{ width: min(860px, calc(100vw - 32px)); border: 0; border-radius: 10px; padding: 0; box-shadow: 0 20px 60px rgba(15, 23, 42, .28); }}
     dialog::backdrop {{ background: rgba(15, 23, 42, .45); }}
@@ -811,6 +938,7 @@ def page_html(
     </div>
 
     {message_html}
+    {results_html}
 
     <form method="post" class="panel">
       <div class="panel-head">
@@ -1102,13 +1230,21 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 target_date = dt.datetime.now(KST).date()
             submit = action in {"submit", "submit_today"}
-            code, output = run_automation(
+            code, output, results = run_automation(
                 selected,
                 submit=submit,
                 target_date=target_date,
                 start_time=start_time,
             )
-            message = "실행 성공" if code == 0 else f"실행 실패(exit={code}). 로그와 디버그 파일을 확인하세요."
+            failed_count = sum(1 for result in results if result.get("status") == "failed")
+            success_count = len(results) - failed_count
+            action_label = "쿠폰 발급" if submit else "입력 테스트"
+            if failed_count == 0:
+                message = f"{action_label} 완료: {success_count}개 모두 성공했습니다."
+            elif success_count:
+                message = f"{action_label} 완료: {success_count}개 성공, {failed_count}개 실패했습니다."
+            else:
+                message = f"{action_label} 실패: 선택한 {failed_count}개 쿠폰을 만들지 못했습니다."
             self.respond(
                 page_html(
                     coupons,
@@ -1116,8 +1252,10 @@ class Handler(BaseHTTPRequestHandler):
                     message,
                     output,
                     same_day_start_time=start_time or "",
+                    execution_results=results,
+                    execution_submit=submit,
                 ),
-                status=200 if code == 0 else 500,
+                status=200 if code == 0 and failed_count == 0 else 500,
             )
             return
 

@@ -31,6 +31,8 @@ DEFAULT_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 )
 COUPON_MODAL_SELECTOR = "[role='dialog'].n-modal, .n-card.n-modal, .n-modal-container"
+RESULTS_BEGIN = "__WING_COUPON_RESULTS_BEGIN__"
+RESULTS_END = "__WING_COUPON_RESULTS_END__"
 
 
 class AutomationError(RuntimeError):
@@ -947,6 +949,7 @@ def create_coupon(
         "start_at": start_at,
         "submit": submit,
         "vendor_item_count": len(row["vendor_item_ids"]),
+        "status": "success" if submit else "preview",
     }
 
 
@@ -1134,7 +1137,9 @@ def main() -> int:
                     log(f"Coupon failed but continuing: {failure['error']}")
                     if not args.continue_on_error:
                         raise
+            print(RESULTS_BEGIN)
             print(json.dumps(results, ensure_ascii=False, indent=2))
+            print(RESULTS_END)
             return 1 if failures else 0
         finally:
             context.close()
