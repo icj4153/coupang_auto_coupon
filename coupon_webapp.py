@@ -363,10 +363,16 @@ def coupon_summary(coupon: dict[str, str]) -> str:
     return f"{kind} / {discount_type} / {detail}"
 
 
-def run_automation(coupons: list[dict[str, str]], submit: bool) -> tuple[int, str]:
+def run_automation(
+    coupons: list[dict[str, str]],
+    submit: bool,
+    *,
+    target_date: dt.date | None = None,
+    start_time: str | None = None,
+) -> tuple[int, str]:
     LOG_DIR.mkdir(exist_ok=True)
     write_csv(coupons)
-    target_date = dt.datetime.now(KST).date() + dt.timedelta(days=1)
+    target_date = target_date or (dt.datetime.now(KST).date() + dt.timedelta(days=1))
     stamp = dt.datetime.now(KST).strftime("%Y-%m-%d_%H%M%S")
     log_path = LOG_DIR / f"{stamp}_{'submit' if submit else 'test'}.log"
     config_path = os.environ.get("COUPON_CONFIG_PATH", "browser_coupon_config.json")
@@ -384,6 +390,8 @@ def run_automation(coupons: list[dict[str, str]], submit: bool) -> tuple[int, st
         "--auto-login",
         "--continue-on-error",
     ]
+    if start_time:
+        cmd.extend(["--start-time", start_time])
     if submit:
         cmd.append("--submit")
     completed = subprocess.run(
@@ -395,6 +403,22 @@ def run_automation(coupons: list[dict[str, str]], submit: bool) -> tuple[int, st
     )
     log_path.write_text(completed.stdout, encoding="utf-8")
     return completed.returncode, completed.stdout
+
+
+def validate_same_day_start_time(value: str) -> tuple[str, str]:
+    value = value.strip()
+    try:
+        start_clock = dt.time.fromisoformat(value)
+    except ValueError:
+        return "", "당일 시작 시간을 HH:MM 형식으로 입력하세요."
+    normalized = start_clock.strftime("%H:%M")
+    now = dt.datetime.now(KST)
+    start_at = dt.datetime.combine(now.date(), start_clock, tzinfo=KST)
+    if start_at <= now:
+        return "", "당일 시작 시간은 현재 시각보다 뒤여야 합니다."
+    if start_clock >= dt.time(23, 59):
+        return "", "당일 시작 시간은 23:59보다 앞이어야 합니다."
+    return normalized, ""
 
 
 def scheduler_time() -> str:
@@ -636,6 +660,7 @@ def page_html(
     show_modal: bool = False,
     modal_product: dict[str, str] | None = None,
     show_product_modal: bool = False,
+    same_day_start_time: str = "",
 ) -> bytes:
     today = dt.datetime.now(KST).date()
     target_date = today + dt.timedelta(days=1)
@@ -688,6 +713,17 @@ def page_html(
     .panel {{ background: #fff; border: 1px solid #d9dee5; border-radius: 8px; overflow: hidden; margin-bottom: 18px; }}
     .panel-head {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 18px; border-bottom: 1px solid #e5e9ef; }}
     .run-actions {{ display: flex; gap: 10px; flex-wrap: wrap; }}
+    .same-day-run {{
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      padding: 14px 18px; border-bottom: 1px solid #e5e9ef; background: #fbfcfe; flex-wrap: wrap;
+    }}
+    .same-day-title strong {{ display: block; font-size: 15px; }}
+    .same-day-title span {{ display: block; margin-top: 4px; color: #667487; font-size: 13px; }}
+    .same-day-controls {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }}
+    .same-day-controls label {{ margin: 0; font-size: 13px; }}
+    .same-day-controls input[type="time"] {{ width: 124px; padding: 10px 12px; }}
+    .today-test {{ background: #e9eef5; color: #26384d; }}
+    .today-submit {{ background: #0b6bcb; color: #fff; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ padding: 14px 16px; border-bottom: 1px solid #eef1f5; text-align: left; vertical-align: middle; }}
     th {{ color: #667487; font-size: 13px; font-weight: 800; background: #fbfcfe; }}
@@ -729,7 +765,7 @@ def page_html(
     fieldset {{ border: 0; margin: 0 0 20px; padding: 0; }}
     legend {{ font-weight: 800; margin: 0 0 10px; }}
     label {{ display: block; font-weight: 700; margin: 18px 0 8px; }}
-    input:not([type="radio"]):not([type="checkbox"]), textarea, select {{
+    input:not([type="radio"]):not([type="checkbox"]):not([type="time"]), textarea, select {{
       width: 100%; box-sizing: border-box; border: 1px solid #c7ced8; border-radius: 6px;
       padding: 12px; font-size: 16px; font-family: inherit; background: #fff;
     }}
@@ -802,6 +838,18 @@ def page_html(
         <div class="run-actions">
           <button class="test" type="submit" name="action" value="test">선택 입력 테스트</button>
           <button class="submit" type="submit" name="action" value="submit" onclick="return confirm('선택한 쿠폰을 실제로 발급할까요?')">선택 쿠폰 만들기 실행</button>
+        </div>
+      </div>
+      <div class="same-day-run">
+        <div class="same-day-title">
+          <strong>당일 쿠폰 생성</strong>
+          <span>선택한 쿠폰을 입력 시간부터 오늘 23:59까지 생성</span>
+        </div>
+        <div class="same-day-controls">
+          <label for="same-day-start-time">시작 시간</label>
+          <input id="same-day-start-time" type="time" name="same_day_start_time" value="{esc(same_day_start_time)}" step="60">
+          <button class="today-test" type="submit" name="action" value="test_today">당일 입력 테스트</button>
+          <button class="today-submit" type="submit" name="action" value="submit_today" onclick="return confirm('선택한 쿠폰을 입력한 시간부터 오늘 23:59까지 실제 발급할까요?')">당일 쿠폰 만들기</button>
         </div>
       </div>
       <table>
@@ -1031,14 +1079,46 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(page_html(coupons, products, "쿠폰을 추가했습니다."))
             return
 
-        if action in {"test", "submit"}:
+        if action in {"test", "submit", "test_today", "submit_today"}:
             selected = selected_coupons(coupons, parsed.get("selected_ids", []))
             if not selected:
                 self.respond(page_html(coupons, products, "실행할 쿠폰을 하나 이상 선택하세요."), status=400)
                 return
-            code, output = run_automation(selected, submit=(action == "submit"))
+            target_date = None
+            start_time = None
+            if action in {"test_today", "submit_today"}:
+                raw_start_time = parsed.get("same_day_start_time", [""])[0]
+                start_time, error = validate_same_day_start_time(raw_start_time)
+                if error:
+                    self.respond(
+                        page_html(
+                            coupons,
+                            products,
+                            error,
+                            same_day_start_time=raw_start_time,
+                        ),
+                        status=400,
+                    )
+                    return
+                target_date = dt.datetime.now(KST).date()
+            submit = action in {"submit", "submit_today"}
+            code, output = run_automation(
+                selected,
+                submit=submit,
+                target_date=target_date,
+                start_time=start_time,
+            )
             message = "실행 성공" if code == 0 else f"실행 실패(exit={code}). 로그와 디버그 파일을 확인하세요."
-            self.respond(page_html(coupons, products, message, output), status=200 if code == 0 else 500)
+            self.respond(
+                page_html(
+                    coupons,
+                    products,
+                    message,
+                    output,
+                    same_day_start_time=start_time or "",
+                ),
+                status=200 if code == 0 else 500,
+            )
             return
 
         self.respond(page_html(coupons, products, "알 수 없는 요청입니다."), status=400)

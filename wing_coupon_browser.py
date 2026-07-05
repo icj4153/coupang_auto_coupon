@@ -68,6 +68,13 @@ def round_up_to_minute(value: dt.datetime) -> dt.datetime:
     return value.replace(second=0, microsecond=0)
 
 
+def parse_clock_time(value: str) -> dt.time:
+    match = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", value.strip())
+    if not match:
+        raise AutomationError(f"Invalid start time: {value!r}. Use HH:MM.")
+    return dt.time(int(match.group(1)), int(match.group(2)))
+
+
 def parse_vendor_items(value: str) -> list[str]:
     return [part.strip() for part in re.split(r"[\s,;]+", value) if part.strip()]
 
@@ -97,12 +104,19 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def coupon_window(target_date: dt.date, now: dt.datetime | None = None) -> tuple[str, str]:
+def coupon_window(
+    target_date: dt.date,
+    now: dt.datetime | None = None,
+    start_time: str | None = None,
+) -> tuple[str, str]:
     now_kst = now.astimezone(KST) if now else dt.datetime.now(KST)
     start_at = dt.datetime.combine(target_date, dt.time(0, 0, 0))
     end_at = dt.datetime.combine(target_date, dt.time(23, 59, 0))
 
-    if target_date == now_kst.date():
+    if start_time:
+        start_at = dt.datetime.combine(target_date, parse_clock_time(start_time))
+        log(f"Using explicit coupon start time: {start_at:%Y-%m-%dT%H:%M}.")
+    elif target_date == now_kst.date():
         buffer_minutes = env_int("COUPON_TODAY_START_BUFFER_MINUTES", 5, minimum=1, maximum=120)
         start_at = round_up_to_minute(now_kst.replace(tzinfo=None) + dt.timedelta(minutes=buffer_minutes))
         log(
@@ -892,9 +906,10 @@ def create_coupon(
     submit: bool,
     open_create_button: bool = True,
     append_date_suffix: bool = False,
+    start_time: str | None = None,
 ) -> dict[str, Any]:
     selectors = config.get("selectors", {})
-    start_at, end_at = coupon_window(target_date)
+    start_at, end_at = coupon_window(target_date, start_time=start_time)
     display_name = campaign_name(row["campaign_name"], target_date, append_date_suffix=append_date_suffix)
 
     log(f"Creating coupon for CSV line {row['line']}: {display_name}")
@@ -929,6 +944,7 @@ def create_coupon(
         "line": row["line"],
         "campaign_name": display_name,
         "target_date": str(target_date),
+        "start_at": start_at,
         "submit": submit,
         "vendor_item_count": len(row["vendor_item_ids"]),
     }
@@ -939,6 +955,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="browser_coupon_config.json", help="Browser automation JSON config.")
     parser.add_argument("--csv", default="browser_coupons.csv", help="Coupon CSV file.")
     parser.add_argument("--target-date", help="Coupon date YYYY-MM-DD. Defaults to tomorrow in KST.")
+    parser.add_argument("--start-time", help="Explicit coupon start time HH:MM for the target date.")
     parser.add_argument("--days", type=int, default=1, help="Create one coupon per day starting at target date.")
     parser.add_argument("--append-date-suffix", action="store_true", help="Append MM/DD to coupon names.")
     parser.add_argument("--inspect", action="store_true", help="Open WING, print URL/title, save screenshot, then wait.")
@@ -1033,6 +1050,10 @@ def main() -> int:
     config = load_json(config_path)
     if args.days < 1:
         raise AutomationError("--days must be at least 1.")
+    if args.start_time:
+        parse_clock_time(args.start_time)
+        if args.days != 1:
+            raise AutomationError("--start-time can only be used with --days 1.")
     if args.fresh_login and not args.auto_login:
         raise AutomationError("--fresh-login requires --auto-login.")
     if args.submit and args.days > 1 and not args.allow_multi_day_submit:
@@ -1094,6 +1115,7 @@ def main() -> int:
                             submit=args.submit,
                             open_create_button=not args.manual_coupon_page,
                             append_date_suffix=append_date_suffix,
+                            start_time=args.start_time,
                         )
                     )
                 except Exception as exc:
