@@ -38,6 +38,8 @@ COUPON_WEB_USER=admin
 COUPON_WEB_PASSWORD=긴_랜덤_비밀번호
 COUPON_WEB_BIND=127.0.0.1
 COUPON_DAILY_TIME=22:30
+COUPANG_LOGIN_ATTEMPTS=3
+COUPANG_LOGIN_RETRY_SECONDS=60
 COUPON_TODAY_START_BUFFER_MINUTES=5
 ```
 
@@ -78,6 +80,8 @@ https://icj7297.synology.me:8766
 당일 쿠폰이 필요하면 자동화 쿠폰 목록에서 쿠폰을 선택하고 `당일 쿠폰 생성` 영역에 시작 시간을 입력합니다. `당일 입력 테스트`는 실제 발급 없이 입력과 상품 조회까지만 확인하고, `당일 쿠폰 만들기`는 입력한 시간부터 당일 23:59까지 실제 발급합니다. 시작 시간은 현재 시각보다 뒤여야 합니다.
 
 스케줄러 컨테이너가 켜져 있으면 매일 `22:30`에 저장된 전체 쿠폰을 다음날 날짜 기준으로 미리 발급합니다. 시간은 `.env` 또는 `docker-compose.yml`의 `COUPON_DAILY_TIME`으로 바꿀 수 있습니다.
+
+자동 실행은 저장된 로그인 세션을 먼저 사용합니다. 세션이 만료된 경우 환경변수 ID/PW로 로그인하며, 일시적인 `Access Denied`가 발생하면 기본 60초 간격으로 최대 3회 로그인만 재시도합니다.
 
 자동 실행으로 생성되는 쿠폰 유효기간은 다음날 `00:00`부터 `23:59`까지입니다. `COUPON_TODAY_START_BUFFER_MINUTES`는 CLI로 당일 쿠폰을 직접 만들 때만 사용하는 안전 보정값입니다.
 

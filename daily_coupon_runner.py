@@ -75,7 +75,6 @@ def main() -> int:
             "1",
             "--submit",
             "--auto-login",
-            "--fresh-login",
             "--continue-on-error",
         ]
 

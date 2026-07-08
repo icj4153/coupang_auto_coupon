@@ -850,6 +850,9 @@ def attempt_auto_login(page: Page, context: BrowserContext, config: dict[str, An
             page.wait_for_load_state("domcontentloaded", timeout=1000)
         except TimeoutError:
             pass
+        if looks_like_access_denied(page):
+            save_artifacts(page, "wing_login_access_denied_after_submit")
+            raise AutomationError("WING login redirect returned Access Denied after submitting credentials.")
         if not looks_like_login(page):
             log(f"Auto-login completed at: {page.title()} / {page.url}")
             save_storage_state(context, config)
@@ -865,8 +868,23 @@ def attempt_auto_login(page: Page, context: BrowserContext, config: dict[str, An
 def ensure_logged_in(page: Page, context: BrowserContext, config: dict[str, Any], *, auto_login: bool) -> None:
     if not looks_like_login(page):
         return
-    if auto_login and attempt_auto_login(page, context, config):
-        return
+    if auto_login:
+        attempts = env_int("COUPANG_LOGIN_ATTEMPTS", 3, minimum=1, maximum=5)
+        retry_seconds = env_int("COUPANG_LOGIN_RETRY_SECONDS", 60, minimum=10, maximum=600)
+        for attempt in range(1, attempts + 1):
+            try:
+                if attempt_auto_login(page, context, config):
+                    return
+                break
+            except AutomationError as exc:
+                if attempt >= attempts:
+                    raise
+                log(
+                    f"Auto-login attempt {attempt}/{attempts} failed: {exc} "
+                    f"Retrying in {retry_seconds} seconds."
+                )
+                page.wait_for_timeout(retry_seconds * 1000)
+                navigate_to_coupon_page(page, config)
     raise AutomationError("Login session expired. Set COUPANG_WING_ID and COUPANG_WING_PASSWORD in .env.")
 
 
@@ -1105,10 +1123,10 @@ def main() -> int:
             failures = []
             jobs = [(row, target_date) for row in rows for target_date in target_dates]
             for job_index, (row, target_date) in enumerate(jobs):
-                if job_index > 0 and not args.manual_coupon_page:
-                    navigate_to_coupon_page(page, config)
-                    ensure_logged_in(page, context, config, auto_login=args.auto_login)
                 try:
+                    if job_index > 0 and not args.manual_coupon_page:
+                        navigate_to_coupon_page(page, config)
+                        ensure_logged_in(page, context, config, auto_login=args.auto_login)
                     results.append(
                         create_coupon(
                             page,
