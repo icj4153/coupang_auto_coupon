@@ -18,7 +18,7 @@ import coupon_webapp
 ROOT = Path(__file__).resolve().parent
 KST = ZoneInfo("Asia/Seoul")
 LOG_DIR = coupon_webapp.LOG_DIR
-LOCK_PATH = coupon_webapp.DATA_DIR / ".daily_coupon_runner.lock"
+LOCK_PATH = coupon_webapp.RUN_LOCK_PATH
 
 
 def log(message: str) -> None:
@@ -60,7 +60,17 @@ def main() -> int:
             print(output, end="")
             return 0
 
-        coupon_webapp.write_csv(coupons)
+        runnable_coupons = coupon_webapp.pending_coupons_for_date(target_date, coupons)
+        if not runnable_coupons:
+            output = (
+                f"[daily-coupon] All coupons for {target_date} already succeeded. "
+                "Nothing to run.\n"
+            )
+            log_path.write_text(output, encoding="utf-8")
+            print(output, end="")
+            return 0
+
+        coupon_webapp.write_csv(runnable_coupons)
         config_path = os.environ.get("COUPON_CONFIG_PATH", "browser_coupon_config.json")
         cmd = [
             sys.executable,
@@ -82,7 +92,7 @@ def main() -> int:
             "============================================================\n"
             f"Daily coupon run start: {dt.datetime.now(KST).isoformat(timespec='seconds')}\n"
             f"Target date: {target_date}\n"
-            f"Coupon count: {len(coupons)}\n"
+            f"Coupon count: {len(runnable_coupons)} pending / {len(coupons)} total\n"
             f"Command: {' '.join(cmd)}\n"
             "============================================================\n"
         )
@@ -105,6 +115,26 @@ def main() -> int:
             "============================================================\n"
         )
         log_path.write_text(header + completed.stdout + footer, encoding="utf-8")
+        results = coupon_webapp.parse_automation_results(completed.stdout)
+        if not results:
+            results = coupon_webapp.fallback_automation_results(
+                runnable_coupons,
+                submit=True,
+                returncode=completed.returncode,
+                output=completed.stdout,
+            )
+        for result in results:
+            result.setdefault("target_date", str(target_date))
+        summary = coupon_webapp.record_run_results(
+            target_date,
+            runnable_coupons,
+            results,
+            log_path=log_path,
+            returncode=completed.returncode,
+            source="auto",
+            all_coupons=coupons,
+        )
+        coupon_webapp.notify_after_run(target_date, coupons, summary)
         print(header + completed.stdout + footer, end="")
         return completed.returncode
 

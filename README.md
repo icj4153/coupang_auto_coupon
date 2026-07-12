@@ -5,7 +5,7 @@
 ## 구조
 
 - `coupang-coupon-web`: 상품/쿠폰을 관리하는 웹폼
-- `coupang-coupon-scheduler`: 매일 `COUPON_DAILY_TIME`에 쿠폰 발급 실행
+- `coupang-coupon-scheduler`: 전날 밤부터 실패분을 반복 재시도하며 쿠폰 발급 실행
 - `data/`: NAS에 남는 쿠폰 목록, 상품 목록, 로그, 디버그 파일
 - `nas_update.sh`: GitHub에서 최신 코드 pull 후 Docker 재빌드
 
@@ -37,10 +37,11 @@ COUPANG_WING_PASSWORD=쿠팡WING비밀번호
 COUPON_WEB_USER=admin
 COUPON_WEB_PASSWORD=긴_랜덤_비밀번호
 COUPON_WEB_BIND=127.0.0.1
-COUPON_DAILY_TIME=22:30
-COUPANG_LOGIN_ATTEMPTS=3
+COUPANG_LOGIN_ATTEMPTS=5
 COUPANG_LOGIN_RETRY_SECONDS=60
 COUPON_TODAY_START_BUFFER_MINUTES=5
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
 ```
 
 `COUPON_WEB_BIND=127.0.0.1`은 NAS 내부와 역방향 프록시에서만 웹폼에 접근하게 하는 설정입니다. 외부 공개 시에는 반드시 `COUPON_WEB_PASSWORD`를 길고 예측 불가능하게 설정하세요.
@@ -79,13 +80,15 @@ https://icj7297.synology.me:8766
 
 당일 쿠폰이 필요하면 자동화 쿠폰 목록에서 쿠폰을 선택하고 `당일 쿠폰 생성` 영역에 시작 시간을 입력합니다. `당일 입력 테스트`는 실제 발급 없이 입력과 상품 조회까지만 확인하고, `당일 쿠폰 만들기`는 입력한 시간부터 당일 23:59까지 실제 발급합니다. 시작 시간은 현재 시각보다 뒤여야 합니다.
 
-스케줄러 컨테이너가 켜져 있으면 매일 `22:30`에 저장된 전체 쿠폰을 다음날 날짜 기준으로 미리 발급합니다. 시간은 `.env` 또는 `docker-compose.yml`의 `COUPON_DAILY_TIME`으로 바꿀 수 있습니다.
+스케줄러 컨테이너가 켜져 있으면 전날 `22:30`에 다음날 쿠폰 생성을 시작합니다. 실패한 쿠폰은 전날 `22:50`, `23:10`, `23:30`, `23:50`에 다시 시도하고, 자정 이후에도 남아 있으면 당일 `00:05`, `01:05`, `02:05`, `04:05`, `08:05`, `12:05`에 긴급 복구합니다.
 
-자동 실행은 저장된 로그인 세션을 먼저 사용합니다. 세션이 만료된 경우 환경변수 ID/PW로 로그인하며, 일시적인 `Access Denied`가 발생하면 기본 60초 간격으로 최대 3회 로그인만 재시도합니다.
+자동 실행은 저장된 로그인 세션을 먼저 사용합니다. 세션이 만료된 경우 환경변수 ID/PW로 로그인하며, 일시적인 `Access Denied`가 발생하면 기본 60초부터 점진 대기하며 최대 5회 로그인 재시도합니다.
 
-자동 실행으로 생성되는 쿠폰 유효기간은 다음날 `00:00`부터 `23:59`까지입니다. `COUPON_TODAY_START_BUFFER_MINUTES`는 CLI로 당일 쿠폰을 직접 만들 때만 사용하는 안전 보정값입니다.
+전날 생성되는 쿠폰 유효기간은 다음날 `00:00`부터 `23:59`까지입니다. 당일 긴급 복구로 생성되는 쿠폰은 현재 시각 기준 `COUPON_TODAY_START_BUFFER_MINUTES`분 뒤부터 당일 `23:59`까지입니다.
 
-여러 쿠폰 중 하나가 실패해도 뒤 쿠폰은 계속 시도합니다. 다만 실패 항목이 하나라도 있으면 실행 결과는 실패(exit=1)로 남고, `browser_artifacts/`에 해당 쿠폰의 스크린샷과 HTML이 저장됩니다.
+여러 쿠폰 중 하나가 실패해도 뒤 쿠폰은 계속 시도합니다. 성공한 쿠폰은 `/data/logs/coupon_run_status.json`에 기록되어 다음 재시도에서 제외되고, 실패/미완료 쿠폰만 다시 실행됩니다. 실패 항목이 있으면 `browser_artifacts/`에 해당 쿠폰의 스크린샷과 HTML이 저장됩니다.
+
+`TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`를 설정하면 첫 실패, 일부 실패, 복구 성공, 최종 실패 시 텔레그램 알림을 보냅니다.
 
 ## 상태 확인
 
@@ -99,8 +102,8 @@ cd /volume1/docker/coupang_coupon
 스케줄러가 정상 대기 중이면 아래처럼 보입니다.
 
 ```text
-[nas-scheduler] Scheduler started. Daily run time: 22:30 Asia/Seoul
-[nas-scheduler] Each run creates coupons for the next KST date.
+[nas-scheduler] Scheduler started. Retry slots: previous day 22:30/22:50/23:10/23:30/23:50, same day 00:05/01:05/02:05/04:05/08:05/12:05 Asia/Seoul
+[nas-scheduler] Each run creates only coupons that are not yet marked successful.
 ```
 
 실제 발급 없이 계획만 확인:

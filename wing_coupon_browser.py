@@ -91,6 +91,7 @@ def load_rows(path: Path) -> list[dict[str, Any]]:
             rows.append(
                 {
                     "line": index,
+                    "coupon_id": row.get("coupon_id", "").strip(),
                     "campaign_name": row["campaign_name"].strip(),
                     "coupon_kind": row.get("coupon_kind", "instant").strip().lower(),
                     "vendor_item_ids": parse_vendor_items(row["vendor_item_ids"]),
@@ -512,25 +513,32 @@ def click_final_create_coupon(page: Page) -> None:
     if not visible(button, timeout=3000):
         save_artifacts(page, "final_create_button_not_found")
         raise AutomationError("Could not find the final '할인쿠폰 만들기' button in the coupon form.")
-    click_or_js(button, "final 할인쿠폰 만들기", timeout=5000)
-
-    confirm = page.locator(COUPON_MODAL_SELECTOR).last.get_by_role(
-        "button",
-        name=re.compile(r"^(확인|예|OK|Confirm)$", re.I),
-    )
-    if visible(confirm, timeout=3000):
-        click_or_js(confirm, "final confirmation", timeout=5000)
-
     success = page.get_by_text(re.compile("쿠폰.*(성공|완료)|성공적으로 생성|생성이 완료", re.I)).last
-    deadline = time.monotonic() + 12
-    while time.monotonic() < deadline:
-        if visible(success, timeout=250):
-            log("WING reported coupon creation success.")
+
+    def wait_for_submit_completion(timeout_seconds: int) -> bool:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if visible(success, timeout=250):
+                log("WING reported coupon creation success.")
+                return True
+            if not visible(button, timeout=250):
+                log("Final coupon form closed after submit.")
+                return True
+            page.wait_for_timeout(300)
+        return False
+
+    for attempt in range(1, 3):
+        click_or_js(button, "final 할인쿠폰 만들기", timeout=5000)
+        confirm = page.locator(COUPON_MODAL_SELECTOR).last.get_by_role(
+            "button",
+            name=re.compile(r"^(확인|예|OK|Confirm)$", re.I),
+        )
+        if visible(confirm, timeout=3000):
+            click_or_js(confirm, "final confirmation", timeout=5000)
+        if wait_for_submit_completion(12 if attempt == 1 else 30):
             return
-        if not visible(button, timeout=250):
-            log("Final coupon form closed after submit.")
-            return
-        page.wait_for_timeout(300)
+        if attempt == 1:
+            log("Final coupon form stayed open after submit. Retrying the final submit once.")
 
     error_text = ""
     try:
@@ -869,7 +877,7 @@ def ensure_logged_in(page: Page, context: BrowserContext, config: dict[str, Any]
     if not looks_like_login(page):
         return
     if auto_login:
-        attempts = env_int("COUPANG_LOGIN_ATTEMPTS", 3, minimum=1, maximum=5)
+        attempts = env_int("COUPANG_LOGIN_ATTEMPTS", 5, minimum=1, maximum=5)
         retry_seconds = env_int("COUPANG_LOGIN_RETRY_SECONDS", 60, minimum=10, maximum=600)
         for attempt in range(1, attempts + 1):
             try:
@@ -881,9 +889,9 @@ def ensure_logged_in(page: Page, context: BrowserContext, config: dict[str, Any]
                     raise
                 log(
                     f"Auto-login attempt {attempt}/{attempts} failed: {exc} "
-                    f"Retrying in {retry_seconds} seconds."
+                    f"Retrying in {retry_seconds * attempt} seconds."
                 )
-                page.wait_for_timeout(retry_seconds * 1000)
+                page.wait_for_timeout(retry_seconds * attempt * 1000)
                 navigate_to_coupon_page(page, config)
     raise AutomationError("Login session expired. Set COUPANG_WING_ID and COUPANG_WING_PASSWORD in .env.")
 
@@ -961,6 +969,7 @@ def create_coupon(
         save_artifacts(page, f"submitted_{artifact_label}")
 
     return {
+        "coupon_id": row.get("coupon_id", ""),
         "line": row["line"],
         "campaign_name": display_name,
         "target_date": str(target_date),

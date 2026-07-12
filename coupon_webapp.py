@@ -6,13 +6,16 @@ from __future__ import annotations
 import base64
 import csv
 import datetime as dt
+import fcntl
 import hmac
 import html
 import json
 import os
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -28,9 +31,13 @@ COUPONS_PATH = DATA_DIR / "coupon_form_coupons.json"
 PRODUCTS_PATH = DATA_DIR / "coupon_products.json"
 GENERATED_CSV_PATH = DATA_DIR / "browser_coupons.generated.csv"
 LOG_DIR = Path(os.environ.get("COUPON_LOG_DIR", DATA_DIR / "logs")).expanduser()
+RUN_STATUS_PATH = LOG_DIR / "coupon_run_status.json"
+RUN_LOCK_PATH = DATA_DIR / ".coupon_run.lock"
 KST = ZoneInfo("Asia/Seoul")
 RESULTS_BEGIN = "__WING_COUPON_RESULTS_BEGIN__"
 RESULTS_END = "__WING_COUPON_RESULTS_END__"
+PREVIOUS_DAY_RETRY_TIMES = ("22:30", "22:50", "23:10", "23:30", "23:50")
+SAME_DAY_RETRY_TIMES = ("00:05", "01:05", "02:05", "04:05", "08:05", "12:05")
 
 DEFAULT_COUPON = {
     "campaign_name": "오늘만 특가",
@@ -259,12 +266,416 @@ def selected_coupons(coupons: list[dict[str, str]], selected_ids: list[str]) -> 
     return [coupon for coupon in coupons if coupon["id"] in selected]
 
 
+def iso_now() -> str:
+    return dt.datetime.now(KST).isoformat(timespec="seconds")
+
+
+def coupon_key(coupon: dict[str, str]) -> str:
+    return str(coupon.get("id") or coupon["campaign_name"]).strip()
+
+
+def load_run_status() -> dict[str, object]:
+    if not RUN_STATUS_PATH.exists():
+        return {"dates": {}}
+    try:
+        with RUN_STATUS_PATH.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {"dates": {}}
+    if not isinstance(data, dict):
+        return {"dates": {}}
+    dates = data.get("dates")
+    if not isinstance(dates, dict):
+        data["dates"] = {}
+    return data
+
+
+def save_run_status(state: dict[str, object]) -> None:
+    RUN_STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUN_STATUS_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(state, handle, ensure_ascii=False, indent=2)
+
+
+def run_date_entry(state: dict[str, object], target_date: dt.date) -> dict[str, object]:
+    dates = state.setdefault("dates", {})
+    if not isinstance(dates, dict):
+        dates = {}
+        state["dates"] = dates
+    key = target_date.isoformat()
+    entry = dates.setdefault(
+        key,
+        {
+            "target_date": key,
+            "completed": False,
+            "coupons": {},
+            "run_slots": {},
+            "notifications": {},
+        },
+    )
+    if not isinstance(entry, dict):
+        entry = {"target_date": key}
+        dates[key] = entry
+    entry.setdefault("target_date", key)
+    entry.setdefault("completed", False)
+    entry.setdefault("coupons", {})
+    entry.setdefault("run_slots", {})
+    entry.setdefault("notifications", {})
+    return entry
+
+
+def coupon_record(entry: dict[str, object], coupon: dict[str, str]) -> dict[str, object]:
+    records = entry.setdefault("coupons", {})
+    if not isinstance(records, dict):
+        records = {}
+        entry["coupons"] = records
+    key = coupon_key(coupon)
+    record = records.setdefault(
+        key,
+        {
+            "coupon_id": key,
+            "campaign_name": coupon["campaign_name"],
+            "status": "pending",
+            "attempt_count": 0,
+            "last_error": "",
+            "last_log": "",
+        },
+    )
+    if not isinstance(record, dict):
+        record = {}
+        records[key] = record
+    record["coupon_id"] = key
+    record["campaign_name"] = coupon["campaign_name"]
+    return record
+
+
+def coupon_status_for_date(
+    target_date: dt.date,
+    coupon: dict[str, str],
+    *,
+    state: dict[str, object] | None = None,
+) -> str:
+    state = state or load_run_status()
+    entry = state.get("dates", {}).get(target_date.isoformat(), {})
+    if not isinstance(entry, dict):
+        return "pending"
+    records = entry.get("coupons", {})
+    if not isinstance(records, dict):
+        return "pending"
+    record = records.get(coupon_key(coupon), {})
+    if not isinstance(record, dict):
+        return "pending"
+    status = str(record.get("status") or "pending")
+    return status if status in {"success", "failed", "pending", "skipped"} else "pending"
+
+
+def pending_coupons_for_date(target_date: dt.date, coupons: list[dict[str, str]]) -> list[dict[str, str]]:
+    state = load_run_status()
+    return [
+        coupon
+        for coupon in coupons
+        if coupon_status_for_date(target_date, coupon, state=state) != "success"
+    ]
+
+
+def skipped_success_results(target_date: dt.date, coupons: list[dict[str, str]]) -> list[dict[str, object]]:
+    return [
+        {
+            "coupon_id": coupon_key(coupon),
+            "campaign_name": coupon["campaign_name"],
+            "target_date": str(target_date),
+            "submit": True,
+            "vendor_item_count": option_count(coupon),
+            "status": "skipped",
+            "error": "이미 성공 기록된 쿠폰이라 중복 생성을 방지했습니다.",
+        }
+        for coupon in coupons
+    ]
+
+
+def split_already_successful(
+    target_date: dt.date,
+    coupons: list[dict[str, str]],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    state = load_run_status()
+    pending = []
+    skipped = []
+    for coupon in coupons:
+        if coupon_status_for_date(target_date, coupon, state=state) == "success":
+            skipped.append(coupon)
+        else:
+            pending.append(coupon)
+    return pending, skipped
+
+
+def result_coupon_key(
+    result: dict[str, object],
+    coupons_by_id: dict[str, dict[str, str]],
+    coupons_by_name: dict[str, dict[str, str]],
+) -> str | None:
+    raw_id = str(result.get("coupon_id") or "").strip()
+    if raw_id in coupons_by_id:
+        return raw_id
+    name = str(result.get("campaign_name") or "").strip()
+    coupon = coupons_by_name.get(name)
+    return coupon_key(coupon) if coupon else None
+
+
+def run_status_summary(
+    target_date: dt.date,
+    coupons: list[dict[str, str]],
+    *,
+    state: dict[str, object] | None = None,
+) -> dict[str, object]:
+    state = state or load_run_status()
+    entry = state.get("dates", {}).get(target_date.isoformat(), {})
+    records = entry.get("coupons", {}) if isinstance(entry, dict) else {}
+    if not isinstance(records, dict):
+        records = {}
+    success = failed = pending = 0
+    failed_names = []
+    pending_names = []
+    for coupon in coupons:
+        record = records.get(coupon_key(coupon), {})
+        status = str(record.get("status") if isinstance(record, dict) else "pending") or "pending"
+        if status == "success":
+            success += 1
+        elif status == "failed":
+            failed += 1
+            failed_names.append(coupon["campaign_name"])
+        else:
+            pending += 1
+            pending_names.append(coupon["campaign_name"])
+    total = len(coupons)
+    return {
+        "target_date": str(target_date),
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "pending": pending,
+        "unfinished": failed + pending,
+        "completed": bool(total and success == total),
+        "failed_names": failed_names,
+        "pending_names": pending_names,
+        "last_log": entry.get("last_log", "") if isinstance(entry, dict) else "",
+        "last_run_at": entry.get("last_run_at", "") if isinstance(entry, dict) else "",
+        "last_exit_code": entry.get("last_exit_code", "") if isinstance(entry, dict) else "",
+    }
+
+
+def record_run_results(
+    target_date: dt.date,
+    attempted_coupons: list[dict[str, str]],
+    results: list[dict[str, object]],
+    *,
+    log_path: Path,
+    returncode: int,
+    source: str,
+    all_coupons: list[dict[str, str]] | None = None,
+) -> dict[str, object]:
+    state = load_run_status()
+    all_coupons = all_coupons or attempted_coupons
+    previous = run_status_summary(target_date, all_coupons, state=state)
+    entry = run_date_entry(state, target_date)
+    coupons_by_id = {coupon_key(coupon): coupon for coupon in attempted_coupons}
+    coupons_by_name = {coupon["campaign_name"]: coupon for coupon in attempted_coupons}
+    results_by_id: dict[str, dict[str, object]] = {}
+    for result in results:
+        key = result_coupon_key(result, coupons_by_id, coupons_by_name)
+        if key:
+            results_by_id[key] = result
+
+    for coupon in all_coupons:
+        coupon_record(entry, coupon)
+
+    for coupon in attempted_coupons:
+        record = coupon_record(entry, coupon)
+        result = results_by_id.get(coupon_key(coupon), {})
+        status = str(result.get("status") or "failed")
+        if status == "skipped":
+            continue
+        record["status"] = "success" if status == "success" else "failed"
+        record["attempt_count"] = int(record.get("attempt_count") or 0) + 1
+        record["last_attempt_at"] = iso_now()
+        record["last_log"] = log_path.name
+        record["last_error"] = "" if record["status"] == "success" else str(result.get("error") or "쿠폰 생성 실패")
+        record["vendor_item_count"] = option_count(coupon)
+        if result.get("start_at"):
+            record["start_at"] = str(result["start_at"])
+
+    entry["last_run_at"] = iso_now()
+    entry["last_log"] = log_path.name
+    entry["last_exit_code"] = str(returncode)
+    entry["last_source"] = source
+    summary = run_status_summary(target_date, all_coupons, state=state)
+    entry["completed"] = summary["completed"]
+    save_run_status(state)
+    summary["previous_unfinished"] = previous["unfinished"]
+    return summary
+
+
+def parse_clock(value: str) -> dt.time:
+    hour, minute = value.split(":", 1)
+    return dt.time(int(hour), int(minute))
+
+
+def scheduled_slots_for_target(target_date: dt.date) -> list[dt.datetime]:
+    previous_day = target_date - dt.timedelta(days=1)
+    slots = [
+        dt.datetime.combine(previous_day, parse_clock(value), tzinfo=KST)
+        for value in PREVIOUS_DAY_RETRY_TIMES
+    ]
+    slots.extend(
+        dt.datetime.combine(target_date, parse_clock(value), tzinfo=KST)
+        for value in SAME_DAY_RETRY_TIMES
+    )
+    return sorted(slots)
+
+
+def next_retry_time(target_date: dt.date, coupons: list[dict[str, str]]) -> str:
+    summary = run_status_summary(target_date, coupons)
+    if summary["completed"]:
+        return "완료"
+    now = dt.datetime.now(KST)
+    state = load_run_status()
+    entry = run_date_entry(state, target_date)
+    run_slots = entry.get("run_slots", {})
+    if not isinstance(run_slots, dict):
+        run_slots = {}
+    for slot_at in scheduled_slots_for_target(target_date):
+        slot_key = slot_at.isoformat(timespec="minutes")
+        if slot_at > now and slot_key not in run_slots:
+            return slot_at.strftime("%m/%d %H:%M")
+    return "수동 복구 필요"
+
+
+def mark_scheduler_slot_started(target_date: dt.date, slot_at: dt.datetime) -> None:
+    state = load_run_status()
+    entry = run_date_entry(state, target_date)
+    run_slots = entry.setdefault("run_slots", {})
+    if not isinstance(run_slots, dict):
+        run_slots = {}
+        entry["run_slots"] = run_slots
+    run_slots[slot_at.isoformat(timespec="minutes")] = {
+        "started_at": iso_now(),
+        "exit_code": "",
+    }
+    save_run_status(state)
+
+
+def mark_scheduler_slot_finished(target_date: dt.date, slot_at: dt.datetime, exit_code: int) -> None:
+    state = load_run_status()
+    entry = run_date_entry(state, target_date)
+    run_slots = entry.setdefault("run_slots", {})
+    if not isinstance(run_slots, dict):
+        run_slots = {}
+        entry["run_slots"] = run_slots
+    record = run_slots.setdefault(slot_at.isoformat(timespec="minutes"), {})
+    if isinstance(record, dict):
+        record["finished_at"] = iso_now()
+        record["exit_code"] = str(exit_code)
+    save_run_status(state)
+
+
+def scheduler_slot_was_started(target_date: dt.date, slot_at: dt.datetime) -> bool:
+    state = load_run_status()
+    entry = state.get("dates", {}).get(target_date.isoformat(), {})
+    if not isinstance(entry, dict):
+        return False
+    run_slots = entry.get("run_slots", {})
+    return isinstance(run_slots, dict) and slot_at.isoformat(timespec="minutes") in run_slots
+
+
+def has_run_status_for_date(target_date: dt.date) -> bool:
+    state = load_run_status()
+    dates = state.get("dates", {})
+    if not isinstance(dates, dict):
+        return False
+    entry = dates.get(target_date.isoformat())
+    return isinstance(entry, dict)
+
+
+def send_telegram_message(message: str) -> bool:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+    if not token or not chat_id:
+        return False
+    data = urllib.parse.urlencode({"chat_id": chat_id, "text": message}).encode("utf-8")
+    request = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data=data,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return 200 <= response.status < 300
+    except (urllib.error.URLError, TimeoutError) as exc:
+        print(f"[telegram] 알림 전송 실패: {exc}", flush=True)
+        return False
+
+
+def notify_run_event(
+    target_date: dt.date,
+    coupons: list[dict[str, str]],
+    event_key: str,
+    title: str,
+) -> bool:
+    state = load_run_status()
+    entry = run_date_entry(state, target_date)
+    notifications = entry.setdefault("notifications", {})
+    if not isinstance(notifications, dict):
+        notifications = {}
+        entry["notifications"] = notifications
+    if notifications.get(event_key):
+        return False
+    if not os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() or not os.environ.get("TELEGRAM_CHAT_ID", "").strip():
+        print("[telegram] TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID가 없어 알림을 기록만 하고 건너뜁니다.", flush=True)
+        notifications[event_key] = f"telegram_not_configured:{iso_now()}"
+        save_run_status(state)
+        return False
+    summary = run_status_summary(target_date, coupons, state=state)
+    failed_names = [*summary["failed_names"], *summary["pending_names"]]
+    lines = [
+        f"[쿠팡 쿠폰 자동화] {title}",
+        f"대상일: {target_date}",
+        f"성공: {summary['success']} / 실패·미완료: {summary['unfinished']} / 전체: {summary['total']}",
+    ]
+    if failed_names:
+        lines.append("대상 쿠폰: " + ", ".join(str(name) for name in failed_names[:8]))
+    if summary.get("last_log"):
+        lines.append(f"로그: {summary['last_log']}")
+    if not send_telegram_message("\n".join(lines)):
+        return False
+    notifications[event_key] = iso_now()
+    save_run_status(state)
+    return True
+
+
+def notify_after_run(target_date: dt.date, coupons: list[dict[str, str]], summary: dict[str, object]) -> None:
+    unfinished = int(summary.get("unfinished") or 0)
+    success = int(summary.get("success") or 0)
+    previous_unfinished = int(summary.get("previous_unfinished") or 0)
+    if unfinished:
+        if success:
+            notify_run_event(target_date, coupons, "partial_failure", "일부 쿠폰 생성 실패")
+        else:
+            notify_run_event(target_date, coupons, "first_failure", "쿠폰 자동 생성 실패")
+    elif previous_unfinished:
+        notify_run_event(target_date, coupons, "recovered", "실패 쿠폰 복구 성공")
+
+
+def notify_final_failure(target_date: dt.date, coupons: list[dict[str, str]]) -> None:
+    summary = run_status_summary(target_date, coupons)
+    if int(summary.get("unfinished") or 0):
+        notify_run_event(target_date, coupons, "final_failure", "최종 복구 시간 이후에도 실패")
+
+
 def write_csv(coupons: list[dict[str, str]]) -> None:
     GENERATED_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
     with GENERATED_CSV_PATH.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(
             handle,
             fieldnames=[
+                "coupon_id",
                 "enabled",
                 "campaign_name",
                 "coupon_kind",
@@ -280,6 +691,7 @@ def write_csv(coupons: list[dict[str, str]]) -> None:
         for coupon in coupons:
             writer.writerow(
                 {
+                    "coupon_id": coupon_key(coupon),
                     "enabled": "true",
                     "campaign_name": coupon["campaign_name"],
                     "coupon_kind": coupon["coupon_kind"],
@@ -404,8 +816,11 @@ def fallback_automation_results(
     )
     return [
         {
+            "coupon_id": coupon_key(coupon),
             "campaign_name": coupon["campaign_name"],
+            "target_date": "",
             "submit": submit,
+            "vendor_item_count": option_count(coupon),
             "status": "failed",
             "error": error,
         }
@@ -421,46 +836,87 @@ def run_automation(
     start_time: str | None = None,
 ) -> tuple[int, str, list[dict[str, object]]]:
     LOG_DIR.mkdir(exist_ok=True)
-    write_csv(coupons)
     target_date = target_date or (dt.datetime.now(KST).date() + dt.timedelta(days=1))
     stamp = dt.datetime.now(KST).strftime("%Y-%m-%d_%H%M%S")
     log_path = LOG_DIR / f"{stamp}_{'submit' if submit else 'test'}.log"
-    config_path = os.environ.get("COUPON_CONFIG_PATH", "browser_coupon_config.json")
-    cmd = [
-        sys.executable,
-        str(ROOT / "wing_coupon_browser.py"),
-        "--config",
-        config_path,
-        "--csv",
-        str(GENERATED_CSV_PATH),
-        "--target-date",
-        str(target_date),
-        "--days",
-        "1",
-        "--auto-login",
-        "--continue-on-error",
-    ]
-    if start_time:
-        cmd.extend(["--start-time", start_time])
+    skipped_results: list[dict[str, object]] = []
+    runnable_coupons = coupons
     if submit:
-        cmd.append("--submit")
-    completed = subprocess.run(
-        cmd,
-        cwd=ROOT,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    log_path.write_text(completed.stdout, encoding="utf-8")
+        runnable_coupons, skipped_coupons = split_already_successful(target_date, coupons)
+        skipped_results = skipped_success_results(target_date, skipped_coupons)
+        if not runnable_coupons:
+            output = "선택한 쿠폰은 모두 이미 성공 기록이 있어 중복 생성을 건너뛰었습니다.\n"
+            log_path.write_text(output, encoding="utf-8")
+            return 0, output, skipped_results
+
+    RUN_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUN_LOCK_PATH.open("w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            output = "다른 쿠폰 생성 작업이 이미 실행 중입니다. 완료 후 다시 시도하세요.\n"
+            log_path.write_text(output, encoding="utf-8")
+            return (
+                1,
+                output,
+                skipped_results
+                + fallback_automation_results(
+                    runnable_coupons,
+                    submit=submit,
+                    returncode=1,
+                    output=output,
+                ),
+            )
+
+        write_csv(runnable_coupons)
+        config_path = os.environ.get("COUPON_CONFIG_PATH", "browser_coupon_config.json")
+        cmd = [
+            sys.executable,
+            str(ROOT / "wing_coupon_browser.py"),
+            "--config",
+            config_path,
+            "--csv",
+            str(GENERATED_CSV_PATH),
+            "--target-date",
+            str(target_date),
+            "--days",
+            "1",
+            "--auto-login",
+            "--continue-on-error",
+        ]
+        if start_time:
+            cmd.extend(["--start-time", start_time])
+        if submit:
+            cmd.append("--submit")
+        completed = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
     results = parse_automation_results(completed.stdout)
     if not results:
         results = fallback_automation_results(
-            coupons,
+            runnable_coupons,
             submit=submit,
             returncode=completed.returncode,
             output=completed.stdout,
         )
-    return completed.returncode, completed.stdout, results
+    for result in results:
+        result.setdefault("target_date", str(target_date))
+    log_path.write_text(completed.stdout, encoding="utf-8")
+    if submit:
+        record_run_results(
+            target_date,
+            runnable_coupons,
+            results,
+            log_path=log_path,
+            returncode=completed.returncode,
+            source="manual",
+            all_coupons=load_state()[0],
+        )
+    return completed.returncode, completed.stdout, skipped_results + results
 
 
 def validate_same_day_start_time(value: str) -> tuple[str, str]:
@@ -480,7 +936,7 @@ def validate_same_day_start_time(value: str) -> tuple[str, str]:
 
 
 def scheduler_time() -> str:
-    return os.environ.get("COUPON_DAILY_TIME", "22:30").strip() or "22:30"
+    return f"{PREVIOUS_DAY_RETRY_TIMES[0]} 시작"
 
 
 def esc(value: object) -> str:
@@ -718,9 +1174,16 @@ def execution_results_html(results: list[dict[str, object]], submit: bool) -> st
     summary = f"성공 {success_count}개 · 실패 {failed_count}개"
     rows = []
     for result in results:
-        failed = result.get("status") == "failed"
-        status_label = "실패" if failed else ("발급 성공" if submit else "입력 완료")
-        status_class = "result-status failed" if failed else "result-status success"
+        status = str(result.get("status") or "")
+        failed = status == "failed"
+        skipped = status == "skipped"
+        if failed:
+            status_label = "실패"
+        elif skipped:
+            status_label = "건너뜀"
+        else:
+            status_label = "발급 성공" if submit else "입력 완료"
+        status_class = "result-status skipped" if skipped else ("result-status failed" if failed else "result-status success")
         target_date = str(result.get("target_date") or "-")
         start_at = str(result.get("start_at") or "")
         schedule = start_at.replace("T", " ") if start_at else target_date
@@ -747,6 +1210,82 @@ def execution_results_html(results: list[dict[str, object]], submit: bool) -> st
           <tbody>{''.join(rows)}</tbody>
         </table>
       </div>
+    </section>
+    """
+
+
+def status_label(summary: dict[str, object]) -> tuple[str, str]:
+    if summary["completed"]:
+        return "완료", "success"
+    if int(summary.get("failed") or 0):
+        return "실패 있음", "failed"
+    return "미완료", "pending"
+
+
+def run_status_card_html(label: str, target_date: dt.date, coupons: list[dict[str, str]]) -> str:
+    summary = run_status_summary(target_date, coupons)
+    status_text, status_class = status_label(summary)
+    unfinished_names = [*summary["failed_names"], *summary["pending_names"]]
+    names_text = ", ".join(str(name) for name in unfinished_names[:4])
+    if len(unfinished_names) > 4:
+        names_text += f" 외 {len(unfinished_names) - 4}개"
+    if not names_text:
+        names_text = "미완료 쿠폰 없음"
+    next_time = next_retry_time(target_date, coupons)
+    return f"""
+    <div class="status-card {status_class}">
+      <div class="status-card-head">
+        <strong>{esc(label)} {target_date:%m/%d}</strong>
+        <span>{esc(status_text)}</span>
+      </div>
+      <div class="status-metrics">
+        <span>성공 {summary['success']}</span>
+        <span>실패 {summary['failed']}</span>
+        <span>미완료 {summary['pending']}</span>
+      </div>
+      <div class="muted">다음 재시도: {esc(next_time)}</div>
+      <div class="muted">대상: {esc(names_text)}</div>
+    </div>
+    """
+
+
+def recoverable_coupons(coupons: list[dict[str, str]]) -> tuple[dt.date | None, list[dict[str, str]]]:
+    today = dt.datetime.now(KST).date()
+    for target_date in [today, today + dt.timedelta(days=1)]:
+        pending = pending_coupons_for_date(target_date, coupons)
+        if pending:
+            return target_date, pending
+    return None, []
+
+
+def operation_status_html(coupons: list[dict[str, str]]) -> str:
+    today = dt.datetime.now(KST).date()
+    tomorrow = today + dt.timedelta(days=1)
+    recover_date, pending = recoverable_coupons(coupons)
+    disabled = "disabled" if not pending else ""
+    button_text = "실패/미완료 쿠폰만 지금 복구 실행"
+    hint = (
+        f"{recover_date:%Y-%m-%d} 대상 {len(pending)}개를 실행합니다."
+        if recover_date
+        else "복구할 실패/미완료 쿠폰이 없습니다."
+    )
+    return f"""
+    <section class="operation-status panel">
+      <div class="panel-head">
+        <div>
+          <strong>자동 생성 상태</strong>
+          <div class="muted">성공한 쿠폰은 다시 만들지 않고 실패/미완료 쿠폰만 재시도합니다.</div>
+        </div>
+        <form method="post" class="inline-form">
+          <input type="hidden" name="action" value="recover_failed">
+          <button class="today-submit" type="submit" {disabled} onclick="return confirm('실패/미완료 쿠폰만 실제 발급할까요?')">{button_text}</button>
+        </form>
+      </div>
+      <div class="status-grid">
+        {run_status_card_html("오늘", today, coupons)}
+        {run_status_card_html("내일", tomorrow, coupons)}
+      </div>
+      <div class="status-foot muted">{esc(hint)}</div>
     </section>
     """
 
@@ -780,6 +1319,7 @@ def page_html(
     product_modal = product_modal_html(modal_product or DEFAULT_PRODUCT, show_product_modal)
     product_rows = product_rows_html(products)
     rows_html = coupon_rows_html(coupons, products, target_date)
+    operation_status = operation_status_html(coupons)
     credential_source = wing_credentials.credential_source()
     credential_status = {
         "environment": "환경변수",
@@ -871,8 +1411,21 @@ def page_html(
     .result-status {{ padding: 5px 8px; }}
     .result-summary.success, .result-status.success {{ background: #eaf8f1; color: #176348; }}
     .result-summary.failed, .result-status.failed {{ background: #fff0ee; color: #a02b1a; }}
+    .result-status.skipped {{ background: #eef1f5; color: #405064; }}
     .result-detail {{ min-width: 240px; color: #405064; line-height: 1.45; }}
     .result-table-wrap {{ overflow-x: auto; }}
+    .operation-status {{ padding: 0; }}
+    .status-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; padding: 16px 18px; }}
+    .status-card {{ border: 1px solid #d9dee5; border-radius: 8px; padding: 14px; background: #fbfcfe; }}
+    .status-card.success {{ border-color: #9fd8bd; background: #f5fcf8; }}
+    .status-card.failed {{ border-color: #f0b2a8; background: #fff8f6; }}
+    .status-card.pending {{ border-color: #ead47a; background: #fffdf0; }}
+    .status-card-head {{ display: flex; justify-content: space-between; gap: 10px; align-items: center; margin-bottom: 10px; }}
+    .status-card-head span {{ border-radius: 999px; padding: 5px 8px; background: rgba(255,255,255,.72); font-size: 12px; font-weight: 800; }}
+    .status-metrics {{ display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }}
+    .status-metrics span {{ border-radius: 999px; padding: 5px 8px; background: #fff; border: 1px solid #e5e9ef; font-size: 12px; font-weight: 800; }}
+    .status-foot {{ padding: 0 18px 16px; }}
+    button:disabled {{ opacity: .52; cursor: not-allowed; }}
     @media (max-width: 640px) {{
       .execution-results table, .execution-results tbody, .execution-results tr, .execution-results td {{ display: block; width: 100%; box-sizing: border-box; }}
       .execution-results thead {{ display: none; }}
@@ -939,6 +1492,7 @@ def page_html(
 
     {message_html}
     {results_html}
+    {operation_status}
 
     <form method="post" class="panel">
       <div class="panel-head">
@@ -1207,6 +1761,39 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(page_html(coupons, products, "쿠폰을 추가했습니다."))
             return
 
+        if action == "recover_failed":
+            target_date, recover_coupons = recoverable_coupons(coupons)
+            if not target_date or not recover_coupons:
+                self.respond(page_html(coupons, products, "복구할 실패/미완료 쿠폰이 없습니다."))
+                return
+            code, output, results = run_automation(
+                recover_coupons,
+                submit=True,
+                target_date=target_date,
+            )
+            failed_count = sum(1 for result in results if result.get("status") == "failed")
+            success_count = sum(1 for result in results if result.get("status") == "success")
+            skipped_count = sum(1 for result in results if result.get("status") == "skipped")
+            if failed_count == 0:
+                message = f"복구 실행 완료: {success_count}개 성공"
+                if skipped_count:
+                    message += f", {skipped_count}개 건너뜀"
+                message += "했습니다."
+            else:
+                message = f"복구 실행 완료: {success_count}개 성공, {failed_count}개 실패했습니다."
+            self.respond(
+                page_html(
+                    coupons,
+                    products,
+                    message,
+                    output,
+                    execution_results=results,
+                    execution_submit=True,
+                ),
+                status=200 if code == 0 and failed_count == 0 else 500,
+            )
+            return
+
         if action in {"test", "submit", "test_today", "submit_today"}:
             selected = selected_coupons(coupons, parsed.get("selected_ids", []))
             if not selected:
@@ -1237,10 +1824,14 @@ class Handler(BaseHTTPRequestHandler):
                 start_time=start_time,
             )
             failed_count = sum(1 for result in results if result.get("status") == "failed")
-            success_count = len(results) - failed_count
+            skipped_count = sum(1 for result in results if result.get("status") == "skipped")
+            success_count = len(results) - failed_count - skipped_count
             action_label = "쿠폰 발급" if submit else "입력 테스트"
             if failed_count == 0:
-                message = f"{action_label} 완료: {success_count}개 모두 성공했습니다."
+                message = f"{action_label} 완료: {success_count}개 성공"
+                if skipped_count:
+                    message += f", {skipped_count}개 건너뜀"
+                message += "했습니다."
             elif success_count:
                 message = f"{action_label} 완료: {success_count}개 성공, {failed_count}개 실패했습니다."
             else:
