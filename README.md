@@ -44,13 +44,17 @@ TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 COUPON_SETUP_LOGIN_TIMEOUT_MINUTES=30
 COUPON_VNC_PASSWORD=
-COUPON_VNC_BIND=0.0.0.0
+COUPON_VNC_BIND=127.0.0.1
 COUPON_NAS_LAN_HOST=192.168.50.101
+MAC_WAKE_ON_FAILURE=false
+MAC_WAKE_ADDRESS=
+MAC_WAKE_BROADCAST=192.168.50.255
+MAC_WAKE_PORT=9
 ```
 
 `COUPON_WEB_BIND=127.0.0.1`은 NAS 내부와 역방향 프록시에서만 웹폼에 접근하게 하는 설정입니다. 외부 공개 시에는 반드시 `COUPON_WEB_PASSWORD`를 길고 예측 불가능하게 설정하세요.
 
-`COUPON_VNC_PASSWORD`는 VNC 로그인 화면 비밀번호입니다. 비워두면 `COUPON_WEB_PASSWORD`를 대신 사용합니다. `COUPON_VNC_BIND=0.0.0.0`은 내부망에서 noVNC에 직접 접속하기 위한 설정입니다. 라우터에서 `6080`을 외부 포트포워딩하지 말고, 로그인 갱신이 끝나면 로그인 전용 컨테이너를 내려두는 편이 안전합니다.
+`MAC_WAKE_ON_FAILURE=true`와 `MAC_WAKE_ADDRESS`를 설정하면 WING 로그인 차단/세션 만료 알림을 보낼 때 NAS가 Wake-on-LAN 패킷으로 Mac 깨우기를 시도합니다. Mac의 Wake for network access 설정과 공유기/내부망 환경에 따라 동작 여부가 달라질 수 있습니다.
 
 ## 접속 설정
 
@@ -92,7 +96,7 @@ https://icj7297.synology.me:8766
 
 ## WING 로그인 세션 갱신
 
-쿠팡이 NAS/headless 로그인 화면을 `Access Denied`로 막으면 자동 로그인은 진행할 수 없습니다. 이 경우 NAS 안에 로그인 전용 GUI Chrome을 띄우고 VNC로 직접 로그인해서 세션 파일을 새로 저장합니다.
+쿠팡이 NAS/Linux 로그인 화면을 `Access Denied`로 막으면 NAS에서 새 로그인 세션을 만들 수 없습니다. 이 경우 Mac의 Chrome/Playwright로 WING에 로그인한 뒤, 생성된 세션 파일을 NAS로 업로드합니다.
 
 Mac에서 더블클릭:
 
@@ -107,36 +111,16 @@ cd /Users/joon/Desktop/coupang
 ./refresh_wing_session.command
 ```
 
-명령이 실행되면 NAS의 로그인 전용 컨테이너가 켜지고 브라우저가 아래 주소로 열립니다.
+스크립트 흐름:
 
-```text
-http://192.168.50.101:6080/vnc.html?autoconnect=true&resize=scale&host=192.168.50.101&port=6080
-```
+1. Mac Chrome이 열리고 WING 로그인을 요청합니다.
+2. 로그인 성공이 감지되면 Mac의 `wing_storage_state.json`을 새로 저장합니다.
+3. 세션 파일을 NAS의 `/volume1/docker/coupang_coupon/data/wing_storage_state.server.json`로 업로드합니다.
+4. 원하면 바로 NAS에서 실패/미완료 쿠폰 복구를 실행합니다.
 
-NAS 내부망 IP가 바뀌면 Mac에서 아래처럼 지정해서 실행하세요.
+Mac이 잠들어 있을 수 있다면 시스템 설정에서 `Wake for network access`를 켜고, 필요 시 공유기/앱/DSM Wake-on-LAN으로 Mac을 먼저 깨운 뒤 위 스크립트를 실행합니다.
 
-```bash
-COUPON_NAS_LAN_HOST=변경된_NAS_IP ./refresh_wing_session.command
-```
-
-VNC 비밀번호는 `.env`의 `COUPON_VNC_PASSWORD`입니다. 비워둔 경우 `COUPON_WEB_PASSWORD`를 입력하세요.
-
-VNC 안의 Chrome에서 쿠팡 WING 로그인을 완료하면 자동화가 `/data/wing_storage_state.server.json`에 세션을 저장하고 로그인 전용 컨테이너를 종료합니다. 이후 웹폼의 `실패/미완료 쿠폰만 지금 복구 실행` 버튼을 누르면 해당 날짜의 남은 쿠폰만 다시 생성합니다.
-
-로그인 갱신 후 컨테이너가 자동 종료되지 않았다면 NAS에서 아래 명령으로 내려도 됩니다.
-
-```bash
-cd /volume1/docker/coupang_coupon
-/usr/local/bin/docker-compose -f docker-compose.yml -f docker-compose.login.yml stop coupang-coupon-login-vnc
-```
-
-NAS에서 직접 로그인 전용 컨테이너를 시작하려면:
-
-```bash
-cd /volume1/docker/coupang_coupon
-/usr/local/bin/docker-compose -f docker-compose.yml -f docker-compose.login.yml up -d --build coupang-coupon-login-vnc
-/usr/local/bin/docker logs -f coupang-coupon-login-vnc
-```
+텔레그램 실패 알림이 `Access Denied` 또는 세션 만료로 판단되면 `refresh_wing_session.command` 실행을 안내합니다. `MAC_WAKE_ON_FAILURE=true`와 `MAC_WAKE_ADDRESS`가 설정되어 있으면 알림 발송 시 Mac 깨우기 패킷도 함께 보냅니다.
 
 전날 생성되는 쿠폰 유효기간은 다음날 `00:00`부터 `23:59`까지입니다. 당일 긴급 복구로 생성되는 쿠폰은 현재 시각 기준 `COUPON_TODAY_START_BUFFER_MINUTES`분 뒤부터 당일 `23:59`까지입니다.
 

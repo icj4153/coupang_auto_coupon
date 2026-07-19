@@ -11,6 +11,7 @@ import hmac
 import html
 import json
 import os
+import socket
 import subprocess
 import sys
 import urllib.error
@@ -594,6 +595,46 @@ def has_run_status_for_date(target_date: dt.date) -> bool:
     return isinstance(entry, dict)
 
 
+def env_truthy(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def send_wake_on_lan(mac_address: str) -> bool:
+    clean = mac_address.replace("-", "").replace(":", "").replace(".", "").strip()
+    if len(clean) != 12:
+        print(f"[wake] 잘못된 MAC 주소 형식입니다: {mac_address}", flush=True)
+        return False
+    try:
+        payload = bytes.fromhex("ff" * 6 + clean * 16)
+    except ValueError:
+        print(f"[wake] 잘못된 MAC 주소 형식입니다: {mac_address}", flush=True)
+        return False
+    broadcast = os.environ.get("MAC_WAKE_BROADCAST", "192.168.50.255").strip() or "255.255.255.255"
+    port = int(os.environ.get("MAC_WAKE_PORT", "9") or "9")
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.sendto(payload, (broadcast, port))
+        print(f"[wake] Wake-on-LAN packet sent to {broadcast}:{port}.", flush=True)
+        return True
+    except OSError as exc:
+        print(f"[wake] Wake-on-LAN 전송 실패: {exc}", flush=True)
+        return False
+
+
+def wake_mac_if_configured() -> bool:
+    if not env_truthy("MAC_WAKE_ON_FAILURE", False):
+        return False
+    mac_address = os.environ.get("MAC_WAKE_ADDRESS", "").strip()
+    if not mac_address:
+        print("[wake] MAC_WAKE_ON_FAILURE=true 이지만 MAC_WAKE_ADDRESS가 비어 있습니다.", flush=True)
+        return False
+    return send_wake_on_lan(mac_address)
+
+
 def send_telegram_message(message: str) -> bool:
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -644,6 +685,7 @@ def notify_run_event(
             for record in records.values()
             if isinstance(record, dict)
         )
+    wake_sent = wake_mac_if_configured() if access_denied else False
     lines = [
         f"[쿠팡 쿠폰 자동화] {title}",
         f"대상일: {target_date}",
@@ -655,7 +697,10 @@ def notify_run_event(
         lines.append(f"로그: {summary['last_log']}")
     if access_denied:
         lines.append("원인: WING 로그인 Access Denied 또는 세션 만료")
-        lines.append("조치: Mac에서 refresh_wing_session.command 실행 후 VNC에서 WING 로그인")
+        if wake_sent:
+            lines.append("Mac 깨우기: Wake-on-LAN 패킷 전송 완료")
+        lines.append("조치: Mac을 깨운 뒤 refresh_wing_session.command 실행")
+        lines.append("완료 후 스크립트에서 실패/미완료 쿠폰 복구 실행")
     if not send_telegram_message("\n".join(lines)):
         return False
     notifications[event_key] = iso_now()
