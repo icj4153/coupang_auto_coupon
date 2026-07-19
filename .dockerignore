@@ -5,6 +5,7 @@ __pycache__/
 *.pyc
 logs/
 browser_artifacts/
+data/
 .playwright-wing-profile/
 wing_storage_state.json
 wing_storage_state.server.json

@@ -12,11 +12,20 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY requirements.txt ./
 RUN python3 -m pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        fluxbox \
+        novnc \
+        websockify \
+        x11vnc \
+        xvfb \
+    && rm -rf /var/lib/apt/lists/*
 RUN python3 -m playwright install chrome
 
 COPY . .
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && mkdir -p /data/logs /data/browser_artifacts
+COPY docker/vnc-login.sh /vnc-login.sh
+RUN chmod +x /entrypoint.sh /vnc-login.sh && mkdir -p /data/logs /data/browser_artifacts
 
 EXPOSE 8765
 

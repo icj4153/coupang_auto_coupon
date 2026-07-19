@@ -42,9 +42,15 @@ COUPANG_LOGIN_RETRY_SECONDS=60
 COUPON_TODAY_START_BUFFER_MINUTES=5
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+COUPON_SETUP_LOGIN_TIMEOUT_MINUTES=30
+COUPON_VNC_PASSWORD=
+COUPON_VNC_BIND=0.0.0.0
+COUPON_NAS_LAN_HOST=192.168.50.101
 ```
 
 `COUPON_WEB_BIND=127.0.0.1`은 NAS 내부와 역방향 프록시에서만 웹폼에 접근하게 하는 설정입니다. 외부 공개 시에는 반드시 `COUPON_WEB_PASSWORD`를 길고 예측 불가능하게 설정하세요.
+
+`COUPON_VNC_PASSWORD`는 VNC 로그인 화면 비밀번호입니다. 비워두면 `COUPON_WEB_PASSWORD`를 대신 사용합니다. `COUPON_VNC_BIND=0.0.0.0`은 내부망에서 noVNC에 직접 접속하기 위한 설정입니다. 라우터에서 `6080`을 외부 포트포워딩하지 말고, 로그인 갱신이 끝나면 로그인 전용 컨테이너를 내려두는 편이 안전합니다.
 
 ## 접속 설정
 
@@ -83,6 +89,54 @@ https://icj7297.synology.me:8766
 스케줄러 컨테이너가 켜져 있으면 전날 `22:30`에 다음날 쿠폰 생성을 시작합니다. 실패한 쿠폰은 전날 `22:50`, `23:10`, `23:30`, `23:50`에 다시 시도하고, 자정 이후에도 남아 있으면 당일 `00:05`, `01:05`, `02:05`, `04:05`, `08:05`, `12:05`에 긴급 복구합니다.
 
 자동 실행은 저장된 로그인 세션을 먼저 사용합니다. 세션이 만료된 경우 환경변수 ID/PW로 로그인하며, 일시적인 `Access Denied`가 발생하면 기본 60초부터 점진 대기하며 최대 5회 로그인 재시도합니다.
+
+## WING 로그인 세션 갱신
+
+쿠팡이 NAS/headless 로그인 화면을 `Access Denied`로 막으면 자동 로그인은 진행할 수 없습니다. 이 경우 NAS 안에 로그인 전용 GUI Chrome을 띄우고 VNC로 직접 로그인해서 세션 파일을 새로 저장합니다.
+
+Mac에서 더블클릭:
+
+```text
+refresh_wing_session.command
+```
+
+직접 명령으로 실행:
+
+```bash
+cd /Users/joon/Desktop/coupang
+./refresh_wing_session.command
+```
+
+명령이 실행되면 NAS의 로그인 전용 컨테이너가 켜지고 브라우저가 아래 주소로 열립니다.
+
+```text
+http://192.168.50.101:6080/vnc.html?autoconnect=true&resize=scale&host=192.168.50.101&port=6080
+```
+
+NAS 내부망 IP가 바뀌면 Mac에서 아래처럼 지정해서 실행하세요.
+
+```bash
+COUPON_NAS_LAN_HOST=변경된_NAS_IP ./refresh_wing_session.command
+```
+
+VNC 비밀번호는 `.env`의 `COUPON_VNC_PASSWORD`입니다. 비워둔 경우 `COUPON_WEB_PASSWORD`를 입력하세요.
+
+VNC 안의 Chrome에서 쿠팡 WING 로그인을 완료하면 자동화가 `/data/wing_storage_state.server.json`에 세션을 저장하고 로그인 전용 컨테이너를 종료합니다. 이후 웹폼의 `실패/미완료 쿠폰만 지금 복구 실행` 버튼을 누르면 해당 날짜의 남은 쿠폰만 다시 생성합니다.
+
+로그인 갱신 후 컨테이너가 자동 종료되지 않았다면 NAS에서 아래 명령으로 내려도 됩니다.
+
+```bash
+cd /volume1/docker/coupang_coupon
+/usr/local/bin/docker-compose -f docker-compose.yml -f docker-compose.login.yml stop coupang-coupon-login-vnc
+```
+
+NAS에서 직접 로그인 전용 컨테이너를 시작하려면:
+
+```bash
+cd /volume1/docker/coupang_coupon
+/usr/local/bin/docker-compose -f docker-compose.yml -f docker-compose.login.yml up -d --build coupang-coupon-login-vnc
+/usr/local/bin/docker logs -f coupang-coupon-login-vnc
+```
 
 전날 생성되는 쿠폰 유효기간은 다음날 `00:00`부터 `23:59`까지입니다. 당일 긴급 복구로 생성되는 쿠폰은 현재 시각 기준 `COUPON_TODAY_START_BUFFER_MINUTES`분 뒤부터 당일 `23:59`까지입니다.
 

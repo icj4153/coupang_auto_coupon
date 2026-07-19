@@ -634,6 +634,16 @@ def notify_run_event(
         return False
     summary = run_status_summary(target_date, coupons, state=state)
     failed_names = [*summary["failed_names"], *summary["pending_names"]]
+    entry = state.get("dates", {}).get(target_date.isoformat(), {})
+    records = entry.get("coupons", {}) if isinstance(entry, dict) else {}
+    access_denied = False
+    if isinstance(records, dict):
+        access_denied = any(
+            "access denied" in str(record.get("last_error", "")).lower()
+            or "login session expired" in str(record.get("last_error", "")).lower()
+            for record in records.values()
+            if isinstance(record, dict)
+        )
     lines = [
         f"[쿠팡 쿠폰 자동화] {title}",
         f"대상일: {target_date}",
@@ -643,6 +653,9 @@ def notify_run_event(
         lines.append("대상 쿠폰: " + ", ".join(str(name) for name in failed_names[:8]))
     if summary.get("last_log"):
         lines.append(f"로그: {summary['last_log']}")
+    if access_denied:
+        lines.append("원인: WING 로그인 Access Denied 또는 세션 만료")
+        lines.append("조치: Mac에서 refresh_wing_session.command 실행 후 VNC에서 WING 로그인")
     if not send_telegram_message("\n".join(lines)):
         return False
     notifications[event_key] = iso_now()

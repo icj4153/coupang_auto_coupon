@@ -1,0 +1,24 @@
+version: "3.8"
+
+services:
+  coupang-coupon-login-vnc:
+    build: .
+    container_name: coupang-coupon-login-vnc
+    restart: "no"
+    init: true
+    shm_size: "1gb"
+    command:
+      - /vnc-login.sh
+    env_file:
+      - .env
+    environment:
+      TZ: Asia/Seoul
+      COUPON_DATA_DIR: /data
+      COUPON_CONFIG_PATH: /data/browser_coupon_config.json
+      COUPON_ARTIFACT_DIR: /data/browser_artifacts
+      COUPON_SETUP_LOGIN_TIMEOUT_MINUTES: "${COUPON_SETUP_LOGIN_TIMEOUT_MINUTES:-30}"
+      COUPON_BROWSER_CHANNEL: chrome
+    ports:
+      - "${COUPON_VNC_BIND:-127.0.0.1}:6080:6080"
+    volumes:
+      - ./data:/data

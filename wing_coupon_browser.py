@@ -911,6 +911,54 @@ def wait_for_manual_coupon_page(page: Page) -> None:
     save_artifacts(page, "manual_coupon_page")
 
 
+def setup_login_session(
+    page: Page,
+    context: BrowserContext,
+    config: dict[str, Any],
+    *,
+    timeout_minutes: int,
+) -> None:
+    timeout_minutes = max(1, min(240, timeout_minutes))
+    poll_seconds = env_int("COUPON_SETUP_LOGIN_POLL_SECONDS", 3, minimum=1, maximum=30)
+    start_url = config.get("coupon_page_url") or config.get("wing_url", "https://wing.coupang.com")
+    log("브라우저에서 쿠팡 WING에 직접 로그인하세요.")
+    log("로그인 성공이 감지되면 storage state를 자동 저장하고 종료합니다.")
+    log(f"Login setup timeout: {timeout_minutes} minutes.")
+    page.goto(start_url, wait_until="domcontentloaded")
+    deadline = time.monotonic() + timeout_minutes * 60
+    last_status_log = 0.0
+
+    while time.monotonic() < deadline:
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=1000)
+        except TimeoutError:
+            pass
+        now = time.monotonic()
+        if now - last_status_log >= 10:
+            last_status_log = now
+            try:
+                log(f"Login setup check at: {page.title()} / {page.url}")
+            except Exception:
+                log(f"Login setup check at: {page.url}")
+
+        if looks_like_access_denied(page):
+            log("Access Denied 화면입니다. VNC 브라우저에서 새로고침하거나 wing.coupang.com으로 다시 이동해 로그인해보세요.")
+        elif not looks_like_login(page) and "wing.coupang.com" in page.url.lower():
+            cookies = wing_cookies(context)
+            if cookies:
+                log(f"Coupang cookies in profile: {len(cookies)}")
+                save_storage_state(context, config)
+                save_artifacts(page, "setup_login_saved")
+                log("Login setup completed.")
+                return
+        page.wait_for_timeout(poll_seconds * 1000)
+
+    save_artifacts(page, "setup_login_timeout")
+    raise AutomationError(
+        "Login setup timed out. 쿠팡 WING 로그인 완료 후 대시보드/쿠폰 페이지가 보이는지 확인하세요."
+    )
+
+
 def inspect_session(page: Page, config: dict[str, Any]) -> None:
     page.goto(config.get("wing_url", "https://wing.coupang.com"), wait_until="domcontentloaded")
     page.wait_for_timeout(2500)
@@ -989,6 +1037,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--days", type=int, default=1, help="Create one coupon per day starting at target date.")
     parser.add_argument("--append-date-suffix", action="store_true", help="Append MM/DD to coupon names.")
     parser.add_argument("--inspect", action="store_true", help="Open WING, print URL/title, save screenshot, then wait.")
+    parser.add_argument("--setup-login", action="store_true", help="Open a browser and save WING storage state after manual login.")
+    parser.add_argument("--setup-login-timeout-minutes", type=int, default=30, help="How long to wait for manual login in setup mode.")
     parser.add_argument("--manual-coupon-page", action="store_true", help="Let the user navigate to the coupon page before automation.")
     parser.add_argument("--submit", action="store_true", help="Actually click the final submit button.")
     parser.add_argument(
@@ -1015,8 +1065,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def browser_launch_options(config: dict[str, Any]) -> dict[str, Any]:
+    headless = bool(config.get("headless", False))
+    env_headless = os.environ.get("COUPON_BROWSER_HEADLESS", "").strip()
+    if env_headless:
+        headless = truthy(env_headless)
     options: dict[str, Any] = {
-        "headless": bool(config.get("headless", False)),
+        "headless": headless,
         "slow_mo": int(config.get("slow_mo_ms", 0)),
     }
     launch_args = config.get("launch_args", ["--disable-blink-features=AutomationControlled"])
@@ -1074,7 +1128,7 @@ def main() -> int:
     csv_path = Path(args.csv)
     if not config_path.exists():
         raise AutomationError(f"Missing config file: {config_path}")
-    if not csv_path.exists():
+    if not args.inspect and not args.setup_login and not csv_path.exists():
         raise AutomationError(f"Missing CSV file: {csv_path}")
 
     config = load_json(config_path)
@@ -1084,8 +1138,8 @@ def main() -> int:
         parse_clock_time(args.start_time)
         if args.days != 1:
             raise AutomationError("--start-time can only be used with --days 1.")
-    if args.fresh_login and not args.auto_login:
-        raise AutomationError("--fresh-login requires --auto-login.")
+    if args.fresh_login and not (args.auto_login or args.setup_login):
+        raise AutomationError("--fresh-login requires --auto-login or --setup-login.")
     if args.submit and args.days > 1 and not args.allow_multi_day_submit:
         raise AutomationError(
             "Multi-day submit is blocked for safety. Coupang WING appears to accept the form "
@@ -1106,6 +1160,8 @@ def main() -> int:
         browser_channel = selected_browser_channel(config)
         if browser_channel:
             log(f"Using browser channel: {browser_channel}")
+        if args.setup_login:
+            launch_options["headless"] = False
         browser = p.chromium.launch(**launch_options)
         if args.fresh_login:
             log("Fresh login mode enabled. Saved browser storage state will be ignored for this run.")
@@ -1114,6 +1170,15 @@ def main() -> int:
         page = context.pages[0] if context.pages else context.new_page()
         page.bring_to_front()
         try:
+            if args.setup_login:
+                setup_login_session(
+                    page,
+                    context,
+                    config,
+                    timeout_minutes=args.setup_login_timeout_minutes,
+                )
+                return 0
+
             if args.inspect:
                 inspect_session(page, config)
                 return 0
