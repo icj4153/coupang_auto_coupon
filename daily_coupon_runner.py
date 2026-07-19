@@ -46,6 +46,17 @@ def main() -> int:
     log_suffix = "daily_coupon_dry_run" if args.dry_run else "daily_coupon"
     log_path = LOG_DIR / f"{target_date:%Y-%m-%d}_{log_suffix}.log"
 
+    pause_info = coupon_webapp.automation_pause_info()
+    if pause_info:
+        output = (
+            f"[daily-coupon] Automation is paused at {dt.datetime.now(KST).isoformat()}.\n"
+            f"Reason: {pause_info.get('reason', '')}\n"
+            "Run refresh_wing_session.command after Coupang WING access works again.\n"
+        )
+        log_path.write_text(output, encoding="utf-8")
+        print(output, end="")
+        return 0
+
     with LOCK_PATH.open("w") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

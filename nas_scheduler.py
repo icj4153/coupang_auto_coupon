@@ -64,8 +64,18 @@ def main() -> int:
     coupon_webapp.LOG_DIR.mkdir(parents=True, exist_ok=True)
     log("Scheduler started. Retry slots: previous day 22:30/22:50/23:10/23:30/23:50, same day 00:05/01:05/02:05/04:05/08:05/12:05 Asia/Seoul")
     log("Each run creates only coupons that are not yet marked successful.")
+    pause_logged = False
 
     while True:
+        pause_info = coupon_webapp.automation_pause_info()
+        if pause_info:
+            if not pause_logged:
+                log(f"Automation is paused: {pause_info.get('reason', '')}")
+                log("Run refresh_wing_session.command after Coupang WING access works again.")
+                pause_logged = True
+            time.sleep(30)
+            continue
+        pause_logged = False
         now = dt.datetime.now(KST)
         coupons, _products = coupon_webapp.load_state()
         for target_date, slot_at in due_slots(now):

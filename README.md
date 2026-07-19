@@ -40,6 +40,7 @@ COUPON_WEB_BIND=127.0.0.1
 COUPANG_LOGIN_ATTEMPTS=5
 COUPANG_LOGIN_RETRY_SECONDS=60
 COUPON_TODAY_START_BUFFER_MINUTES=5
+COUPON_PAUSE_ON_ACCESS_DENIED=true
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 COUPON_SETUP_LOGIN_TIMEOUT_MINUTES=30
@@ -93,6 +94,8 @@ https://icj7297.synology.me:8766
 스케줄러 컨테이너가 켜져 있으면 전날 `22:30`에 다음날 쿠폰 생성을 시작합니다. 실패한 쿠폰은 전날 `22:50`, `23:10`, `23:30`, `23:50`에 다시 시도하고, 자정 이후에도 남아 있으면 당일 `00:05`, `01:05`, `02:05`, `04:05`, `08:05`, `12:05`에 긴급 복구합니다.
 
 자동 실행은 저장된 로그인 세션을 먼저 사용합니다. 세션이 만료된 경우 환경변수 ID/PW로 로그인하며, 일시적인 `Access Denied`가 발생하면 기본 60초부터 점진 대기하며 최대 5회 로그인 재시도합니다.
+
+`COUPON_PAUSE_ON_ACCESS_DENIED=true`이면 WING `Access Denied` 또는 로그인 세션 만료가 감지될 때 `/data/logs/automation_paused.json`을 만들고 자동 재시도를 멈춥니다. Mac에서 `refresh_wing_session.command`로 세션 업로드가 성공하면 이 일시정지는 자동으로 해제되고 스케줄러가 다시 켜집니다.
 
 ## WING 로그인 세션 갱신
 

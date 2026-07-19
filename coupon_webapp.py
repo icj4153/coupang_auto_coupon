@@ -33,6 +33,7 @@ PRODUCTS_PATH = DATA_DIR / "coupon_products.json"
 GENERATED_CSV_PATH = DATA_DIR / "browser_coupons.generated.csv"
 LOG_DIR = Path(os.environ.get("COUPON_LOG_DIR", DATA_DIR / "logs")).expanduser()
 RUN_STATUS_PATH = LOG_DIR / "coupon_run_status.json"
+AUTOMATION_PAUSE_PATH = LOG_DIR / "automation_paused.json"
 RUN_LOCK_PATH = DATA_DIR / ".coupon_run.lock"
 KST = ZoneInfo("Asia/Seoul")
 RESULTS_BEGIN = "__WING_COUPON_RESULTS_BEGIN__"
@@ -275,6 +276,58 @@ def coupon_key(coupon: dict[str, str]) -> str:
     return str(coupon.get("id") or coupon["campaign_name"]).strip()
 
 
+def env_truthy(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name, "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "y", "on"}
+
+
+def error_looks_like_access_denied(value: object) -> bool:
+    text = str(value or "").lower()
+    return (
+        "access denied" in text
+        or "login session expired" in text
+        or "wing login redirect returned access denied" in text
+    )
+
+
+def automation_pause_info() -> dict[str, object] | None:
+    if not AUTOMATION_PAUSE_PATH.exists():
+        return None
+    try:
+        with AUTOMATION_PAUSE_PATH.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except Exception:
+        return {"reason": "unknown", "created_at": ""}
+    return data if isinstance(data, dict) else {"reason": "unknown", "created_at": ""}
+
+
+def automation_is_paused() -> bool:
+    return automation_pause_info() is not None
+
+
+def pause_automation(reason: str, *, target_date: dt.date | None = None, log_path: Path | None = None) -> None:
+    if not env_truthy("COUPON_PAUSE_ON_ACCESS_DENIED", True):
+        return
+    AUTOMATION_PAUSE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "created_at": iso_now(),
+        "reason": reason,
+        "target_date": str(target_date) if target_date else "",
+        "log": log_path.name if log_path else "",
+    }
+    with AUTOMATION_PAUSE_PATH.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def clear_automation_pause() -> None:
+    try:
+        AUTOMATION_PAUSE_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def load_run_status() -> dict[str, object]:
     if not RUN_STATUS_PATH.exists():
         return {"dates": {}}
@@ -503,6 +556,13 @@ def record_run_results(
         if result.get("start_at"):
             record["start_at"] = str(result["start_at"])
 
+    if any(error_looks_like_access_denied(result.get("error")) for result in results):
+        pause_automation(
+            "WING Access Denied 또는 로그인 세션 만료가 감지되어 자동 재시도를 중지했습니다.",
+            target_date=target_date,
+            log_path=log_path,
+        )
+
     entry["last_run_at"] = iso_now()
     entry["last_log"] = log_path.name
     entry["last_exit_code"] = str(returncode)
@@ -595,13 +655,6 @@ def has_run_status_for_date(target_date: dt.date) -> bool:
     return isinstance(entry, dict)
 
 
-def env_truthy(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name, "").strip().lower()
-    if not value:
-        return default
-    return value in {"1", "true", "yes", "y", "on"}
-
-
 def send_wake_on_lan(mac_address: str) -> bool:
     clean = mac_address.replace("-", "").replace(":", "").replace(".", "").strip()
     if len(clean) != 12:
@@ -680,8 +733,7 @@ def notify_run_event(
     access_denied = False
     if isinstance(records, dict):
         access_denied = any(
-            "access denied" in str(record.get("last_error", "")).lower()
-            or "login session expired" in str(record.get("last_error", "")).lower()
+            error_looks_like_access_denied(record.get("last_error", ""))
             for record in records.values()
             if isinstance(record, dict)
         )

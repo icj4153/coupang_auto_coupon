@@ -59,9 +59,10 @@ SSH_BASE=(
 
 echo "[session-refresh] Step 2/3: 세션 파일을 NAS로 업로드합니다."
 scp -i "$NAS_KEY" -P "$NAS_PORT" "$LOCAL_STATE_PATH" "$NAS_USER@$NAS_HOST:$REMOTE_TMP"
-"${SSH_BASE[@]}" "set -e; mv '$REMOTE_TMP' '$NAS_STATE_PATH'; chmod 600 '$NAS_STATE_PATH' || true; ls -lh '$NAS_STATE_PATH'"
+"${SSH_BASE[@]}" "set -e; mv '$REMOTE_TMP' '$NAS_STATE_PATH'; chmod 600 '$NAS_STATE_PATH' || true; rm -f /volume1/docker/coupang_coupon/data/logs/automation_paused.json; /usr/local/bin/docker start coupang-coupon-scheduler >/dev/null 2>&1 || true; ls -lh '$NAS_STATE_PATH'"
 
 echo "[session-refresh] Step 3/3: 업로드 완료."
+echo "[session-refresh] NAS 자동화 일시정지를 해제했고, 스케줄러를 다시 켰습니다."
 echo "[session-refresh] NAS 자동화는 다음 실행부터 새 세션을 사용합니다."
 
 printf "[session-refresh] 실패/미완료 쿠폰을 지금 복구 실행할까요? [y/N] "
