@@ -60,7 +60,7 @@ SSH_BASE=(
 )
 
 echo "[session-refresh] Step 2/3: 세션 파일을 NAS로 업로드합니다."
-scp -i "$NAS_KEY" -P "$NAS_PORT" "$LOCAL_STATE_PATH" "$NAS_USER@$NAS_HOST:$REMOTE_TMP"
+ssh -i "$NAS_KEY" -p "$NAS_PORT" -o BatchMode=yes "$NAS_USER@$NAS_HOST" "cat > '$REMOTE_TMP'" < "$LOCAL_STATE_PATH"
 "${SSH_BASE[@]}" "set -e; mv '$REMOTE_TMP' '$NAS_STATE_PATH'; chmod 600 '$NAS_STATE_PATH' || true; rm -f /volume1/docker/coupang_coupon/data/logs/automation_paused.json; /usr/local/bin/docker start coupang-coupon-scheduler >/dev/null 2>&1 || true; ls -lh '$NAS_STATE_PATH'"
 
 echo "[session-refresh] Step 3/3: 업로드 완료."
