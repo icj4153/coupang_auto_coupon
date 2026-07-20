@@ -6,6 +6,7 @@ coupons.csv
 logs/
 browser_artifacts/
 .playwright-wing-profile/
+.chrome-wing-login-profile/
 __pycache__/
 *.pyc
 browser_coupon_config.json

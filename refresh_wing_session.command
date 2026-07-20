@@ -10,6 +10,8 @@ NAS_KEY="${COUPON_NAS_KEY:-$HOME/.ssh/coupang_coupon_nas_actions}"
 NAS_STATE_PATH="${COUPON_NAS_STATE_PATH:-/volume1/docker/coupang_coupon/data/wing_storage_state.server.json}"
 LOCAL_CONFIG="${COUPON_LOCAL_CONFIG:-browser_coupon_config.json}"
 SETUP_TIMEOUT_MINUTES="${COUPON_SETUP_LOGIN_TIMEOUT_MINUTES:-30}"
+CHROME_SESSION_PROFILE_DIR="${COUPON_CHROME_SESSION_PROFILE_DIR:-.chrome-wing-login-profile}"
+CHROME_REMOTE_DEBUGGING_PORT="${COUPON_CHROME_REMOTE_DEBUGGING_PORT:-9223}"
 
 if [[ ! -f "$NAS_KEY" ]]; then
   echo "[session-refresh] NAS SSH key not found: $NAS_KEY" >&2
@@ -35,13 +37,13 @@ print(state_path.resolve())
 PY
 )"
 
-echo "[session-refresh] Step 1/3: Mac Chrome에서 쿠팡 WING 로그인 세션을 새로 만듭니다."
-echo "[session-refresh] 브라우저가 열리면 WING 로그인을 완료하세요."
-python3 wing_coupon_browser.py \
+echo "[session-refresh] Step 1/3: 일반 Chrome에서 쿠팡 WING 로그인 세션을 새로 만듭니다."
+echo "[session-refresh] 브라우저가 열리면 WING 로그인을 완료한 뒤 터미널에서 Enter를 누르세요."
+python3 export_chrome_wing_session.py \
   --config "$LOCAL_CONFIG" \
-  --setup-login \
-  --fresh-login \
-  --setup-login-timeout-minutes "$SETUP_TIMEOUT_MINUTES"
+  --profile-dir "$CHROME_SESSION_PROFILE_DIR" \
+  --port "$CHROME_REMOTE_DEBUGGING_PORT" \
+  --timeout-seconds "$((SETUP_TIMEOUT_MINUTES * 60))"
 
 if [[ ! -s "$LOCAL_STATE_PATH" ]]; then
   echo "[session-refresh] Storage state was not created: $LOCAL_STATE_PATH" >&2

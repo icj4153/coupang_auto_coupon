@@ -99,7 +99,7 @@ https://icj7297.synology.me:8766
 
 ## WING 로그인 세션 갱신
 
-쿠팡이 NAS/Linux 로그인 화면을 `Access Denied`로 막으면 NAS에서 새 로그인 세션을 만들 수 없습니다. 이 경우 Mac의 Chrome/Playwright로 WING에 로그인한 뒤, 생성된 세션 파일을 NAS로 업로드합니다.
+쿠팡이 NAS/Linux 또는 Playwright 로그인 화면을 `Access Denied`로 막으면 자동화 브라우저에서 새 로그인 세션을 만들 수 없습니다. 이 경우 Mac의 일반 Chrome 앱에서 직접 WING에 로그인한 뒤, 그 Chrome 세션을 Playwright storage state 형식으로 export해서 NAS로 업로드합니다.
 
 Mac에서 더블클릭:
 
@@ -116,10 +116,13 @@ cd /Users/joon/Desktop/coupang
 
 스크립트 흐름:
 
-1. Mac Chrome이 열리고 WING 로그인을 요청합니다.
-2. 로그인 성공이 감지되면 Mac의 `wing_storage_state.json`을 새로 저장합니다.
-3. 세션 파일을 NAS의 `/volume1/docker/coupang_coupon/data/wing_storage_state.server.json`로 업로드합니다.
-4. 원하면 바로 NAS에서 실패/미완료 쿠폰 복구를 실행합니다.
+1. 일반 Chrome이 로그인 전용 프로필 `.chrome-wing-login-profile/`로 열립니다.
+2. WING 로그인을 완료한 뒤 터미널에서 Enter를 누릅니다.
+3. Chrome 세션을 읽어 Mac의 `wing_storage_state.json`을 새로 저장합니다.
+4. 세션 파일을 NAS의 `/volume1/docker/coupang_coupon/data/wing_storage_state.server.json`로 업로드합니다.
+5. 원하면 바로 NAS에서 실패/미완료 쿠폰 복구를 실행합니다.
+
+이 방식은 로그인 화면 조작을 Playwright로 하지 않습니다. Playwright는 로그인 완료 후 Chrome에 연결해서 쿠키를 세션 파일로 저장하는 역할만 합니다.
 
 Mac이 잠들어 있을 수 있다면 시스템 설정에서 `Wake for network access`를 켜고, 필요 시 공유기/앱/DSM Wake-on-LAN으로 Mac을 먼저 깨운 뒤 위 스크립트를 실행합니다.
 

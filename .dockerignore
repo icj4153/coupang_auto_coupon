@@ -7,6 +7,7 @@ logs/
 browser_artifacts/
 data/
 .playwright-wing-profile/
+.chrome-wing-login-profile/
 wing_storage_state.json
 wing_storage_state.server.json
 browser_coupons.generated.csv
