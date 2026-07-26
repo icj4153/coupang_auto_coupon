@@ -12,6 +12,26 @@ PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 cd "$APP_DIR"
 mkdir -p data/logs data/browser_artifacts
 
+LOCK_DIR="$APP_DIR/data/.deploy.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  now=$(date +%s)
+  lock_started=$(cat "$LOCK_DIR/started_at" 2>/dev/null || echo 0)
+  case "$lock_started" in
+    ''|*[!0-9]*) lock_started=0 ;;
+  esac
+  lock_age=$((now - lock_started))
+  if [ "$lock_age" -gt 3600 ]; then
+    echo "Removing stale deploy lock older than 1 hour: $LOCK_DIR"
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR"
+  else
+    echo "Another deploy is already running. Leaving current containers untouched."
+    exit 0
+  fi
+fi
+date +%s > "$LOCK_DIR/started_at"
+trap 'rm -rf "$LOCK_DIR"' EXIT INT TERM
+
 if [ -f "$KEY_DIR/github_deploy_key" ]; then
   git_cmd() {
     "$DOCKER" run --rm \
@@ -48,4 +68,18 @@ if [ ! -f data/browser_coupon_config.json ]; then
   cp browser_coupon_config.server.example.json data/browser_coupon_config.json
 fi
 
-"$COMPOSE" up -d --build
+remove_service_containers() {
+  for name in coupang-coupon-web coupang-coupon-scheduler; do
+    ids=$("$DOCKER" ps -aq --filter "name=$name" 2>/dev/null || true)
+    if [ -n "$ids" ]; then
+      echo "Removing stale container(s) matching $name"
+      "$DOCKER" rm -f $ids || true
+    fi
+  done
+}
+
+if ! "$COMPOSE" up -d --build --remove-orphans; then
+  echo "docker-compose up failed. Cleaning service containers and retrying once."
+  remove_service_containers
+  "$COMPOSE" up -d --build --remove-orphans
+fi
