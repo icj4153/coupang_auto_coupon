@@ -350,6 +350,40 @@ def save_run_status(state: dict[str, object]) -> None:
         json.dump(state, handle, ensure_ascii=False, indent=2)
 
 
+def clear_run_status_for_coupon_ids(coupon_ids: list[str], *, from_date: dt.date | None = None) -> int:
+    ids = {coupon_id for coupon_id in coupon_ids if coupon_id}
+    if not ids:
+        return 0
+    from_date = from_date or dt.datetime.now(KST).date()
+    state = load_run_status()
+    dates = state.get("dates", {})
+    if not isinstance(dates, dict):
+        return 0
+
+    removed = 0
+    for date_key, entry in dates.items():
+        try:
+            target_date = dt.date.fromisoformat(str(date_key))
+        except ValueError:
+            continue
+        if target_date < from_date or not isinstance(entry, dict):
+            continue
+        records = entry.get("coupons", {})
+        if not isinstance(records, dict):
+            continue
+        entry_removed = 0
+        for coupon_id in list(ids):
+            if coupon_id in records:
+                records.pop(coupon_id, None)
+                entry_removed += 1
+        if entry_removed:
+            removed += entry_removed
+            entry["completed"] = False
+    if removed:
+        save_run_status(state)
+    return removed
+
+
 def run_date_entry(state: dict[str, object], target_date: dt.date) -> dict[str, object]:
     dates = state.setdefault("dates", {})
     if not isinstance(dates, dict):
@@ -1079,6 +1113,7 @@ def product_rows_html(products: list[dict[str, str]]) -> str:
               <td class="num">{option_count(product)}개</td>
               <td class="date">{esc(product['created_at'][:10])}</td>
               <td class="actions-cell">
+                <button class="edit" type="submit" name="edit_product_id" value="{esc(product['id'])}">수정</button>
                 <button class="delete" type="submit" name="delete_product_id" value="{esc(product['id'])}" onclick="return confirm('이 상품을 삭제할까요? 사용 중인 쿠폰이 있으면 삭제되지 않습니다.')">삭제</button>
               </td>
             </tr>
@@ -1126,6 +1161,7 @@ def coupon_rows_html(
               <td>{esc(coupon_summary(coupon))}</td>
               <td class="date">{target_date:%Y-%m-%d}</td>
               <td class="actions-cell">
+                <button class="edit" type="submit" name="edit_coupon_id" value="{esc(coupon['id'])}">수정</button>
                 <button class="delete" type="submit" name="delete_coupon_id" value="{esc(coupon['id'])}" onclick="return confirm('이 쿠폰을 삭제할까요?')">삭제</button>
               </td>
             </tr>
@@ -1134,8 +1170,15 @@ def coupon_rows_html(
     return "\n".join(rows)
 
 
-def modal_form_html(coupon: dict[str, str], products: list[dict[str, str]], show_modal: bool) -> str:
+def modal_form_html(
+    coupon: dict[str, str],
+    products: list[dict[str, str]],
+    show_modal: bool,
+    *,
+    edit_id: str = "",
+) -> str:
     coupon = normalize_coupon(coupon)
+    is_edit = bool(edit_id)
     coupon_kind_checked = {
         key: "checked" if coupon["coupon_kind"] == key else ""
         for key in COUPON_KIND_LABELS
@@ -1161,14 +1204,20 @@ def modal_form_html(coupon: dict[str, str], products: list[dict[str, str]], show
     else:
         product_options.append("<option value=\"\">먼저 상품을 추가하세요</option>")
     product_select_disabled = "" if products else "disabled"
+    action = "update_coupon" if is_edit else "add_coupon"
+    title = "쿠폰 수정" if is_edit else "쿠폰 추가"
+    description = "조건을 바꾸면 오늘 이후 성공 기록을 초기화합니다." if is_edit else "저장 후 목록에서 선택해 실행합니다."
+    hidden_id = f'<input type="hidden" name="coupon_id" value="{esc(edit_id)}">' if is_edit else ""
+    submit_label = "수정 저장" if is_edit else "저장"
     return f"""
     <dialog id="coupon-modal" {open_attr}>
       <form id="coupon-form" method="post">
-        <input type="hidden" name="action" value="add_coupon">
+        <input type="hidden" name="action" value="{action}">
+        {hidden_id}
         <div class="modal-head">
           <div>
-            <h2>쿠폰 추가</h2>
-            <p>저장 후 목록에서 선택해 실행합니다.</p>
+            <h2>{title}</h2>
+            <p>{description}</p>
           </div>
           <button class="icon-button" type="button" data-close-modal aria-label="닫기">×</button>
         </div>
@@ -1235,24 +1284,31 @@ def modal_form_html(coupon: dict[str, str], products: list[dict[str, str]], show
         <div id="summary" class="summary">{summary}</div>
         <div class="modal-actions">
           <button class="save" type="button" data-close-modal>취소</button>
-          <button class="submit" type="submit">저장</button>
+          <button class="submit" type="submit">{submit_label}</button>
         </div>
       </form>
     </dialog>
     """
 
 
-def product_modal_html(product: dict[str, str], show_modal: bool) -> str:
+def product_modal_html(product: dict[str, str], show_modal: bool, *, edit_id: str = "") -> str:
     product = normalize_product(product)
+    is_edit = bool(edit_id)
     open_attr = "open" if show_modal else ""
+    action = "update_product" if is_edit else "add_product"
+    title = "상품 수정" if is_edit else "상품 추가"
+    description = "옵션ID를 바꾸면 연결된 쿠폰의 오늘 이후 성공 기록을 초기화합니다." if is_edit else "옵션ID 묶음을 저장한 뒤 쿠폰에서 선택합니다."
+    hidden_id = f'<input type="hidden" name="product_id" value="{esc(edit_id)}">' if is_edit else ""
+    submit_label = "수정 저장" if is_edit else "저장"
     return f"""
     <dialog id="product-modal" {open_attr}>
       <form id="product-form" method="post">
-        <input type="hidden" name="action" value="add_product">
+        <input type="hidden" name="action" value="{action}">
+        {hidden_id}
         <div class="modal-head">
           <div>
-            <h2>상품 추가</h2>
-            <p>옵션ID 묶음을 저장한 뒤 쿠폰에서 선택합니다.</p>
+            <h2>{title}</h2>
+            <p>{description}</p>
           </div>
           <button class="icon-button" type="button" data-close-product-modal aria-label="닫기">×</button>
         </div>
@@ -1267,7 +1323,7 @@ def product_modal_html(product: dict[str, str], show_modal: bool) -> str:
 
         <div class="modal-actions">
           <button class="save" type="button" data-close-product-modal>취소</button>
-          <button class="submit" type="submit">저장</button>
+          <button class="submit" type="submit">{submit_label}</button>
         </div>
       </form>
     </dialog>
@@ -1408,8 +1464,10 @@ def page_html(
     *,
     modal_coupon: dict[str, str] | None = None,
     show_modal: bool = False,
+    modal_coupon_edit_id: str = "",
     modal_product: dict[str, str] | None = None,
     show_product_modal: bool = False,
+    modal_product_edit_id: str = "",
     same_day_start_time: str = "",
     execution_results: list[dict[str, object]] | None = None,
     execution_submit: bool = False,
@@ -1425,8 +1483,17 @@ def page_html(
     coupon_count = len(coupons)
     product_count = len(products)
     option_total = sum(option_count(product) for product in products)
-    modal_html = modal_form_html(modal_coupon or DEFAULT_COUPON, products, show_modal)
-    product_modal = product_modal_html(modal_product or DEFAULT_PRODUCT, show_product_modal)
+    modal_html = modal_form_html(
+        modal_coupon or DEFAULT_COUPON,
+        products,
+        show_modal,
+        edit_id=modal_coupon_edit_id,
+    )
+    product_modal = product_modal_html(
+        modal_product or DEFAULT_PRODUCT,
+        show_product_modal,
+        edit_id=modal_product_edit_id,
+    )
     product_rows = product_rows_html(products)
     rows_html = coupon_rows_html(coupons, products, target_date)
     operation_status = operation_status_html(coupons)
@@ -1497,7 +1564,7 @@ def page_html(
     .badge.price {{ background: #eef6e9; color: #2f6d2f; }}
     .badge.rate {{ background: #f1edff; color: #5b3fb4; }}
     .num, .date {{ white-space: nowrap; color: #405064; }}
-    .actions-cell {{ width: 84px; }}
+    .actions-cell {{ width: 132px; white-space: nowrap; }}
     .empty {{ text-align: center; padding: 56px 16px; color: #667487; }}
     button {{
       border: 0; border-radius: 7px; padding: 12px 16px; font-size: 15px; font-weight: 800;
@@ -1510,6 +1577,7 @@ def page_html(
     .status-pill {{ display: inline-flex; align-items: center; min-height: 24px; border-radius: 999px; padding: 9px 12px; background: #eef4ff; color: #174ea6; font-size: 13px; font-weight: 800; }}
     .status-pill.warning {{ background: #fff8d8; color: #8a5b00; }}
     .save {{ background: #e7ebf0; color: #1d2733; }}
+    .edit {{ background: #eef4ff; color: #174ea6; padding: 9px 11px; margin-right: 6px; }}
     .delete {{ background: #fff0ee; color: #bf2a17; padding: 9px 11px; }}
     .notice {{ margin: 0 0 16px; padding: 12px 14px; background: #fff8d8; border: 1px solid #ead47a; border-radius: 8px; }}
     .notice.success {{ background: #eaf8f1; border-color: #9fd8bd; color: #176348; }}
@@ -1817,6 +1885,40 @@ class Handler(BaseHTTPRequestHandler):
         coupons, products = load_state()
         action = parsed.get("action", [""])[0]
 
+        if "edit_product_id" in parsed:
+            edit_id = parsed["edit_product_id"][0]
+            product = next((item for item in products if item["id"] == edit_id), None)
+            if not product:
+                self.respond(page_html(coupons, products, "수정할 상품을 찾을 수 없습니다."), status=404)
+                return
+            self.respond(
+                page_html(
+                    coupons,
+                    products,
+                    modal_product=product,
+                    show_product_modal=True,
+                    modal_product_edit_id=edit_id,
+                )
+            )
+            return
+
+        if "edit_coupon_id" in parsed:
+            edit_id = parsed["edit_coupon_id"][0]
+            coupon = next((item for item in coupons if item["id"] == edit_id), None)
+            if not coupon:
+                self.respond(page_html(coupons, products, "수정할 쿠폰을 찾을 수 없습니다."), status=404)
+                return
+            self.respond(
+                page_html(
+                    coupons,
+                    products,
+                    modal_coupon=coupon,
+                    show_modal=True,
+                    modal_coupon_edit_id=edit_id,
+                )
+            )
+            return
+
         if "delete_product_id" in parsed:
             delete_id = parsed["delete_product_id"][0]
             if any(coupon.get("product_id") == delete_id for coupon in coupons):
@@ -1831,6 +1933,7 @@ class Handler(BaseHTTPRequestHandler):
             delete_id = parsed["delete_coupon_id"][0]
             coupons = [coupon for coupon in coupons if coupon["id"] != delete_id]
             save_coupons(coupons)
+            clear_run_status_for_coupon_ids([delete_id])
             self.respond(page_html(coupons, products, "삭제했습니다."))
             return
 
@@ -1854,6 +1957,47 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(page_html(coupons, products, "상품을 추가했습니다."))
             return
 
+        if action == "update_product":
+            edit_id = parsed.get("product_id", [""])[0]
+            existing = next((item for item in products if item["id"] == edit_id), None)
+            if not existing:
+                self.respond(page_html(coupons, products, "수정할 상품을 찾을 수 없습니다."), status=404)
+                return
+            raw_product = {key: values[0] for key, values in parsed.items()}
+            raw_product["id"] = edit_id
+            raw_product["created_at"] = existing["created_at"]
+            product = normalize_product(raw_product)
+            errors = validate_product(product)
+            if errors:
+                self.respond(
+                    page_html(
+                        coupons,
+                        products,
+                        " ".join(errors),
+                        modal_product=product,
+                        show_product_modal=True,
+                        modal_product_edit_id=edit_id,
+                    ),
+                    status=400,
+                )
+                return
+
+            products = [product if item["id"] == edit_id else item for item in products]
+            affected_coupon_ids: list[str] = []
+            for coupon in coupons:
+                if coupon.get("product_id") == edit_id:
+                    coupon["vendor_item_ids"] = product["vendor_item_ids"]
+                    affected_coupon_ids.append(coupon["id"])
+            save_products(products)
+            if affected_coupon_ids:
+                save_coupons(coupons)
+                reset_count = clear_run_status_for_coupon_ids(affected_coupon_ids)
+                message = f"상품을 수정했습니다. 연결된 쿠폰 {len(affected_coupon_ids)}개의 오늘 이후 실행 기록 {reset_count}건을 초기화했습니다."
+            else:
+                message = "상품을 수정했습니다."
+            self.respond(page_html(coupons, products, message))
+            return
+
         if action == "add_coupon":
             coupon = normalize_coupon({key: values[0] for key, values in parsed.items()})
             product = product_by_id(products).get(coupon.get("product_id", ""))
@@ -1869,6 +2013,39 @@ class Handler(BaseHTTPRequestHandler):
             coupons.append(coupon)
             save_coupons(coupons)
             self.respond(page_html(coupons, products, "쿠폰을 추가했습니다."))
+            return
+
+        if action == "update_coupon":
+            edit_id = parsed.get("coupon_id", [""])[0]
+            existing = next((item for item in coupons if item["id"] == edit_id), None)
+            if not existing:
+                self.respond(page_html(coupons, products, "수정할 쿠폰을 찾을 수 없습니다."), status=404)
+                return
+            raw_coupon = {key: values[0] for key, values in parsed.items()}
+            raw_coupon["id"] = edit_id
+            raw_coupon["created_at"] = existing["created_at"]
+            coupon = normalize_coupon(raw_coupon)
+            product = product_by_id(products).get(coupon.get("product_id", ""))
+            if product:
+                coupon["vendor_item_ids"] = product["vendor_item_ids"]
+            errors = validate_coupon(coupon)
+            if errors:
+                self.respond(
+                    page_html(
+                        coupons,
+                        products,
+                        " ".join(errors),
+                        modal_coupon=coupon,
+                        show_modal=True,
+                        modal_coupon_edit_id=edit_id,
+                    ),
+                    status=400,
+                )
+                return
+            coupons = [coupon if item["id"] == edit_id else item for item in coupons]
+            save_coupons(coupons)
+            reset_count = clear_run_status_for_coupon_ids([edit_id])
+            self.respond(page_html(coupons, products, f"쿠폰을 수정했습니다. 오늘 이후 실행 기록 {reset_count}건을 초기화했습니다."))
             return
 
         if action == "recover_failed":
