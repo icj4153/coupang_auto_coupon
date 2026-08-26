@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import time
@@ -45,21 +47,59 @@ def wait_for_chrome(port: int, timeout_seconds: int = 20) -> None:
     raise RuntimeError(f"Chrome remote debugging port did not open: {port}")
 
 
+def find_chrome_executable() -> str:
+    override = os.environ.get("CHROME_PATH", "").strip()
+    candidates: list[str] = [override] if override else []
+
+    if sys.platform.startswith("win"):
+        for env_name in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"):
+            base = os.environ.get(env_name, "").strip()
+            if base:
+                candidates.append(str(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"))
+    else:
+        for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise RuntimeError(
+        "Google Chrome executable was not found. Install Chrome or set CHROME_PATH."
+    )
+
+
 def launch_chrome(port: int, profile_dir: Path, url: str) -> None:
     profile_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
+    chrome_args = [
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        url,
+    ]
+    if sys.platform == "darwin":
+        subprocess.run(
+            [
+                "open",
+                "-na",
+                "Google Chrome",
+                "--args",
+                *chrome_args,
+            ],
+            check=True,
+        )
+        return
+
+    subprocess.Popen(
         [
-            "open",
-            "-na",
-            "Google Chrome",
-            "--args",
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            url,
+            find_chrome_executable(),
+            *chrome_args,
         ],
-        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
 
 

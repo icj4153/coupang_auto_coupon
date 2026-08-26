@@ -107,6 +107,16 @@ Mac에서 더블클릭:
 refresh_wing_session.command
 ```
 
+Windows PC에서 더블클릭:
+
+```text
+refresh_wing_session_windows.bat
+```
+
+Windows에서는 같은 폴더에 프로젝트 파일을 두고, NAS SSH 키를 기본 경로
+`C:\Users\<사용자>\.ssh\coupang_coupon_nas_actions`에 저장합니다. 다른 키 경로를
+쓰려면 PowerShell에서 `COUPON_NAS_KEY` 환경변수를 지정한 뒤 실행하세요.
+
 직접 명령으로 실행:
 
 ```bash
@@ -118,7 +128,7 @@ cd /Users/joon/Desktop/coupang
 
 1. 일반 Chrome이 로그인 전용 프로필 `.chrome-wing-login-profile/`로 열립니다.
 2. WING 로그인을 완료한 뒤 터미널에서 Enter를 누릅니다.
-3. Chrome 세션을 읽어 Mac의 `wing_storage_state.json`을 새로 저장합니다.
+3. Chrome 세션을 읽어 PC의 `wing_storage_state.json`을 새로 저장합니다.
 4. 세션 파일을 NAS의 `/volume1/docker/coupang_coupon/data/wing_storage_state.server.json`로 업로드합니다.
 5. 원하면 바로 NAS에서 실패/미완료 쿠폰 복구를 실행합니다.
 
@@ -132,7 +142,7 @@ Mac이 잠들어 있을 수 있다면 시스템 설정에서 `Wake for network a
 
 여러 쿠폰 중 하나가 실패해도 뒤 쿠폰은 계속 시도합니다. 성공한 쿠폰은 `/data/logs/coupon_run_status.json`에 기록되어 다음 재시도에서 제외되고, 실패/미완료 쿠폰만 다시 실행됩니다. 실패 항목이 있으면 `browser_artifacts/`에 해당 쿠폰의 스크린샷과 HTML이 저장됩니다.
 
-`TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`를 설정하면 첫 실패, 일부 실패, 복구 성공, 최종 실패 시 텔레그램 알림을 보냅니다.
+`TELEGRAM_BOT_TOKEN`과 `TELEGRAM_CHAT_ID`를 설정하면 실패 또는 미완료 쿠폰이 있을 때만 텔레그램 알림을 보냅니다. 모든 쿠폰이 성공한 경우에는 알림을 보내지 않습니다.
 
 ## 상태 확인
 
