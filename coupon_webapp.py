@@ -741,6 +741,81 @@ def send_telegram_message(message: str) -> bool:
         return False
 
 
+def compact_message_text(value: object, limit: int = 180) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def failure_reason_from_error(error: object) -> str:
+    text = str(error or "")
+    lower = text.lower()
+    if error_looks_like_access_denied(text) or "login session" in lower or "wing login" in lower:
+        return "WING 로그인 Access Denied 또는 세션 만료"
+    if "final coupon submit did not complete" in lower or "creation form stayed open" in lower:
+        return "마지막 할인쿠폰 만들기 후 쿠팡이 생성 완료를 반환하지 않음"
+    if "product search did not return" in lower or "not selected" in lower or "option id" in lower:
+        return "옵션ID 조회 또는 상품 선택 실패"
+    if "start time" in lower or "현재 시각" in text or "과거" in text:
+        return "쿠폰 시작 시간이 쿠팡 기준 현재 시각보다 이르거나 유효하지 않음"
+    if text:
+        return compact_message_text(text, limit=120)
+    return "아직 성공 기록이 없거나 쿠팡 WING 응답을 확인하지 못함"
+
+
+def action_for_failure_reasons(reasons: list[str], *, wake_sent: bool) -> list[str]:
+    actions: list[str] = []
+    if any("Access Denied" in reason or "로그인" in reason or "세션" in reason for reason in reasons):
+        if wake_sent:
+            actions.append("Mac 깨우기 패킷은 전송됨")
+        actions.append("Mac에서 refresh_wing_session.command 실행")
+        actions.append("세션 업로드 후 웹폼에서 실패/미완료 쿠폰만 복구 실행")
+    if any("생성 완료" in reason or "시작 시간" in reason for reason in reasons):
+        actions.append("당일 복구라면 시작 시간을 현재보다 충분히 뒤로 잡고 다시 실행")
+        actions.append("반복 실패 시 browser_artifacts의 실패 화면 확인")
+    if any("옵션ID" in reason or "상품 선택" in reason for reason in reasons):
+        actions.append("웹폼에서 상품 옵션ID가 최신인지 확인 후 쿠폰 다시 실행")
+    if not actions:
+        actions.append("웹폼에서 실패/미완료 쿠폰만 복구 실행")
+        actions.append("반복 실패 시 최근 로그와 browser_artifacts 확인")
+
+    unique: list[str] = []
+    for action in actions:
+        if action not in unique:
+            unique.append(action)
+    return unique
+
+
+def failed_coupon_notification_rows(
+    target_date: dt.date,
+    coupons: list[dict[str, str]],
+    state: dict[str, object],
+) -> list[dict[str, str]]:
+    entry = state.get("dates", {}).get(target_date.isoformat(), {})
+    records = entry.get("coupons", {}) if isinstance(entry, dict) else {}
+    if not isinstance(records, dict):
+        records = {}
+
+    rows = []
+    for coupon in coupons:
+        record = records.get(coupon_key(coupon), {})
+        status = str(record.get("status") if isinstance(record, dict) else "pending") or "pending"
+        if status == "success":
+            continue
+        error = record.get("last_error", "") if isinstance(record, dict) else ""
+        reason = failure_reason_from_error(error)
+        rows.append(
+            {
+                "name": coupon["campaign_name"],
+                "status": status,
+                "reason": reason,
+                "error": compact_message_text(error, limit=140),
+            }
+        )
+    return rows
+
+
 def notify_run_event(
     target_date: dt.date,
     coupons: list[dict[str, str]],
@@ -761,7 +836,10 @@ def notify_run_event(
         save_run_status(state)
         return False
     summary = run_status_summary(target_date, coupons, state=state)
-    failed_names = [*summary["failed_names"], *summary["pending_names"]]
+    failed_total = int(summary.get("unfinished") or 0)
+    if failed_total <= 0:
+        return False
+    failed_rows = failed_coupon_notification_rows(target_date, coupons, state)
     entry = state.get("dates", {}).get(target_date.isoformat(), {})
     records = entry.get("coupons", {}) if isinstance(entry, dict) else {}
     access_denied = False
@@ -772,21 +850,31 @@ def notify_run_event(
             if isinstance(record, dict)
         )
     wake_sent = wake_mac_if_configured() if access_denied else False
+    reasons = []
+    for row in failed_rows:
+        reason = row["reason"]
+        if reason not in reasons:
+            reasons.append(reason)
+    if not reasons:
+        reasons.append("아직 성공 기록이 없거나 쿠팡 WING 응답을 확인하지 못함")
+    actions = action_for_failure_reasons(reasons, wake_sent=wake_sent)
     lines = [
         f"[쿠팡 쿠폰 자동화] {title}",
-        f"대상일: {target_date}",
-        f"성공: {summary['success']} / 실패·미완료: {summary['unfinished']} / 전체: {summary['total']}",
+        f"날짜: {target_date}",
+        f"실패: {failed_total}/{summary['total']}개",
     ]
-    if failed_names:
-        lines.append("대상 쿠폰: " + ", ".join(str(name) for name in failed_names[:8]))
+    if failed_rows:
+        lines.append("실패 쿠폰:")
+        for row in failed_rows[:10]:
+            lines.append(f"- {row['name']}: {row['reason']}")
+        if len(failed_rows) > 10:
+            lines.append(f"- 외 {len(failed_rows) - 10}개")
+    lines.append("원인: " + " / ".join(reasons[:3]))
+    lines.append("해야할 조치:")
+    for action in actions:
+        lines.append(f"- {action}")
     if summary.get("last_log"):
         lines.append(f"로그: {summary['last_log']}")
-    if access_denied:
-        lines.append("원인: WING 로그인 Access Denied 또는 세션 만료")
-        if wake_sent:
-            lines.append("Mac 깨우기: Wake-on-LAN 패킷 전송 완료")
-        lines.append("조치: Mac을 깨운 뒤 refresh_wing_session.command 실행")
-        lines.append("완료 후 스크립트에서 실패/미완료 쿠폰 복구 실행")
     if not send_telegram_message("\n".join(lines)):
         return False
     notifications[event_key] = iso_now()
@@ -797,14 +885,11 @@ def notify_run_event(
 def notify_after_run(target_date: dt.date, coupons: list[dict[str, str]], summary: dict[str, object]) -> None:
     unfinished = int(summary.get("unfinished") or 0)
     success = int(summary.get("success") or 0)
-    previous_unfinished = int(summary.get("previous_unfinished") or 0)
     if unfinished:
         if success:
             notify_run_event(target_date, coupons, "partial_failure", "일부 쿠폰 생성 실패")
         else:
             notify_run_event(target_date, coupons, "first_failure", "쿠폰 자동 생성 실패")
-    elif previous_unfinished:
-        notify_run_event(target_date, coupons, "recovered", "실패 쿠폰 복구 성공")
 
 
 def notify_final_failure(target_date: dt.date, coupons: list[dict[str, str]]) -> None:
